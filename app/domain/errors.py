@@ -62,6 +62,16 @@ class FileTooLarge(DomainError):
     http_status = 413
 
 
+class PaymentDeclined(DomainError):
+    code = "PAYMENT_DECLINED"
+    http_status = 402
+
+
+class PaymentUnavailable(DomainError):
+    code = "PAYMENT_UNAVAILABLE"
+    http_status = 503
+
+
 class SignatureInvalid(DomainError):
     code = "SIGNATURE_INVALID"
     http_status = 422

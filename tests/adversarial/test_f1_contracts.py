@@ -11,7 +11,9 @@ caractere invisible ou ambigu n'apparait en clair dans ce fichier.
 import hashlib
 import itertools
 import json
+import re
 import threading
+import unicodedata
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +23,8 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from app.extensions import db
+from app.models import Contract
 from tests.fixtures.helpers import VALID_BODY, Api, TestUser, assert_error, count_rows, new_key, snapshot
 
 pytestmark = pytest.mark.adversarial
@@ -33,6 +37,12 @@ FULLWIDTH_ALNUM = str.maketrans(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
     "".join(chr(0xFF21 + i) for i in range(26)) + "".join(chr(0xFF10 + i) for i in range(10)),
 )
+FULLWIDTH_LOWER = str.maketrans("abcdefghijklmnopqrstuvwxyz", "".join(chr(0xFF41 + i) for i in range(26)))
+
+# Regle produit (vehicle_plate) : NFKC -> majuscules -> ^[A-Z0-9 -]{1,16}$ + au moins un [A-Z0-9].
+# fullmatch (et non match + "$") : un "\n" final ne doit pas passer.
+PLATE_RE = re.compile(r"[A-Z0-9 -]{1,16}")
+PLATE_ALNUM_RE = re.compile(r"[A-Z0-9]")
 
 
 # --- outils ---------------------------------------------------------------------------------------
@@ -68,6 +78,46 @@ def post_with_content_type(api: Api, path: str, user: TestUser, data: str | byte
     headers = {**user.headers, "Idempotency-Key": new_key()}
     ctype = content_type or None
     return api.http.open(path, method="POST", data=data, headers=headers, content_type=ctype)
+
+
+def is_whitelisted_plate(value: str) -> bool:
+    return PLATE_RE.fullmatch(value) is not None and PLATE_ALNUM_RE.search(value) is not None
+
+
+def reference_plate(value: str) -> str | None:
+    """Oracle de la regle produit : forme normalisee attendue, ou None si 422 attendu."""
+    normalized = unicodedata.normalize("NFKC", value).upper()
+    return normalized if is_whitelisted_plate(normalized) else None
+
+
+def stored_plate(app, cid: str) -> str:
+    """Valeur reellement persistee en base (pas seulement celle renvoyee par l'API)."""
+    with app.app_context():
+        contract = db.session.get(Contract, uuid.UUID(cid))
+        assert contract is not None
+        return contract.vehicle_plate
+
+
+def assert_plate_refused(app, api: Api, owner_user: TestUser, value: str) -> None:
+    before = counts(app)
+
+    resp = api.create(owner_user, {**VALID_BODY, "vehicle_plate": value})
+
+    assert_error(resp, 422, "VALIDATION_ERROR")
+    assert counts(app) == before
+
+
+def assert_plate_normalised(
+    app, api: Api, owner_user: TestUser, client_user: TestUser, value: str, expected: str
+) -> None:
+    resp = api.create(owner_user, {**VALID_BODY, "vehicle_plate": value})
+
+    assert resp.status_code == 201, resp.get_data(as_text=True)[:300]
+    data = resp.get_json()
+    assert data["vehicle"]["plate"] == expected
+    assert api.get(data["id"], client_user).get_json()["vehicle"]["plate"] == expected
+    assert api.get(data["id"], owner_user).get_json()["vehicle"]["plate"] == expected
+    assert stored_plate(app, data["id"]) == expected
 
 
 def assert_never_500(resp) -> None:
@@ -811,8 +861,10 @@ def test_sql_injection_in_texts_is_stored_verbatim(app, api, owner_user, client_
     assert api.get(data["id"], client_user).get_json()["vehicle"]["label"] == label
     assert counts(app) == {"Contract": 1, "EscrowEvent": 1, "IdempotencyKey": 1}
 
+    # liste blanche des plaques : quote, point-virgule, dollar, antislash ou parenthese => 422, rien de cree
     plate = api.create(owner_user, {**VALID_BODY, "vehicle_plate": payload[:16]})
-    assert_never_500(plate)
+    assert_error(plate, 422, "VALIDATION_ERROR")
+    assert count_rows(app, "Contract") == 1
     reason = api.cancel(data["id"], owner_user, body={"reason": payload})
     assert reason.status_code == 200
     assert_chain_coherent(api, data["id"], owner_user)
@@ -1313,6 +1365,7 @@ def test_fuzz_create_one_field_never_500(api, owner_user, client_user, field, va
         assert 1 <= data["deposit"]["amount_cents"] <= 50_000_000
         assert data["deposit"]["currency"] in {"EUR", "CHF", "GBP", "USD"}
         assert data["vehicle"]["label"].strip()
+        assert is_whitelisted_plate(data["vehicle"]["plate"]), ascii(data["vehicle"]["plate"])
         assert data["period"]["start"] < data["period"]["end"]
     else:
         assert_error(resp, 422)
@@ -1443,29 +1496,29 @@ def test_round2_cf_hidden_inside_plate_still_refused(app, api, owner_user, clien
     assert count_rows(app, "Contract") == 0
 
 
-OBSERVED_PLATES = {
+# Anciennes observations (restitution verbatim) : la decision produit les tranche desormais.
+OBSERVED_PLATES_REFUSED = {
     "cyrillique": u(0x410, 0x412) + "-123-" + chr(0x421) + "D",  # homoglyphes de "AB-123-CD"
-    "pleine_chasse": "AB-123-CD".translate(FULLWIDTH_ALNUM),
-    "nfd_vs_nfc": "E\N{COMBINING ACUTE ACCENT}-123-CD",
+    "nfd_vs_nfc": "E\N{COMBINING ACUTE ACCENT}-123-CD",  # NFKC -> U+00C9, hors liste blanche
     "rtl_hebreu": "\N{HEBREW LETTER ALEF}\N{HEBREW LETTER BET}-123-CD",
     "ponctuation_seule": "-",
     "point_seul": ".",
 }
+OBSERVED_PLATES_NORMALISED = {
+    "pleine_chasse": ("AB-123-CD".translate(FULLWIDTH_ALNUM), "AB-123-CD"),
+}
 
 
-@pytest.mark.parametrize("value", OBSERVED_PLATES.values(), ids=OBSERVED_PLATES.keys())
-def test_round2_homoglyph_and_normalisation_plates_never_500_and_roundtrip(
-    api, owner_user, client_user, value
-):
-    """Observation (pas forcement une faille) : la valeur doit au minimum etre restituee verbatim."""
-    resp = api.create(owner_user, {**VALID_BODY, "vehicle_plate": value})
+@pytest.mark.parametrize("value", OBSERVED_PLATES_REFUSED.values(), ids=OBSERVED_PLATES_REFUSED.keys())
+def test_round2_homoglyph_and_odd_plates_are_refused(app, api, owner_user, client_user, value):
+    assert_plate_refused(app, api, owner_user, value)
 
-    assert_never_500(resp)
-    if resp.status_code == 201:
-        cid = resp.get_json()["id"]
-        assert api.get(cid, client_user).get_json()["vehicle"]["plate"] == value
-    else:
-        assert_error(resp, 422, "VALIDATION_ERROR")
+
+@pytest.mark.parametrize(
+    ("value", "expected"), OBSERVED_PLATES_NORMALISED.values(), ids=OBSERVED_PLATES_NORMALISED.keys()
+)
+def test_round2_fullwidth_plate_is_stored_normalised(app, api, owner_user, client_user, value, expected):
+    assert_plate_normalised(app, api, owner_user, client_user, value, expected)
 
 
 ODD_LABELS = {
@@ -1626,3 +1679,343 @@ def test_round2_invisible_chars_in_client_email(app, api, owner_user, client_use
 
     assert_error(resp, 422, "VALIDATION_ERROR")
     assert count_rows(app, "Contract") == 0
+
+
+# ==================================================================================================
+# 11. Boucle 3 : plaque en liste blanche stricte (NFKC -> majuscules -> ^[A-Z0-9 -]{1,16}$)
+# ==================================================================================================
+
+# --- homoglyphes : chaque lettre injectee dans une plaque par ailleurs valide ---------------------
+
+CYRILLIC_HOMOGLYPHS = [0x410, 0x412, 0x421, 0x415, 0x41D, 0x41A, 0x41C, 0x41E, 0x420, 0x422, 0x425]
+CYRILLIC_LOWER_HOMOGLYPHS = [cp + 0x20 for cp in CYRILLIC_HOMOGLYPHS]  # a, v, s, e, n, k, m, o, r, t, h
+GREEK_HOMOGLYPHS = [0x391, 0x392, 0x395, 0x396, 0x397, 0x399, 0x39A, 0x39C, 0x39D, 0x39F, 0x3A1, 0x3A4, 0x3A5]
+OTHER_LOOKALIKES = [
+    0x3A7,  # GREEK CAPITAL CHI (X)
+    0x3BF,  # GREEK SMALL OMICRON -> majuscule grecque, toujours hors liste blanche
+    0x13AA,  # CHEROKEE LETTER GO (A)
+    0x1E9E,  # LATIN CAPITAL SHARP S : pas de decomposition, reste hors liste blanche
+    0x627,  # ARABIC LETTER ALEF
+    0x5D0,  # HEBREW LETTER ALEF
+    0xC0,  # A accent grave : lettre latine mais hors [A-Z]
+]
+HOMOGLYPH_CODEPOINTS = CYRILLIC_HOMOGLYPHS + CYRILLIC_LOWER_HOMOGLYPHS + GREEK_HOMOGLYPHS + OTHER_LOOKALIKES
+
+
+HOMOGLYPH_IDS = [f"U+{cp:04X}" for cp in HOMOGLYPH_CODEPOINTS]
+HOMOGLYPH_POSITIONS = {
+    "debut": ("", "B-123-CD"),
+    "milieu": ("AB-1", "3-CD"),
+    "fin": ("AB-123-C", ""),
+    "seul": ("", ""),
+}
+
+
+@pytest.mark.parametrize("codepoint", HOMOGLYPH_CODEPOINTS, ids=HOMOGLYPH_IDS)
+@pytest.mark.parametrize("position", HOMOGLYPH_POSITIONS.keys())
+def test_round3_homoglyph_in_plate_is_refused(app, api, owner_user, client_user, codepoint, position):
+    """Une plaque qui s'affiche 'AB-123-CD' mais n'est pas en ASCII ne doit jamais etre signee."""
+    prefix, suffix = HOMOGLYPH_POSITIONS[position]
+
+    assert_plate_refused(app, api, owner_user, prefix + chr(codepoint) + suffix)
+
+
+def test_round3_full_cyrillic_lookalike_plate_is_refused(app, api, owner_user, client_user):
+    # "BAKE-HOME-TOP" entierement en capitales cyrilliques
+    value = u(0x412, 0x410, 0x41A, 0x415) + "-" + u(0x41D, 0x41E, 0x41C, 0x415) + "-" + u(0x422, 0x41E, 0x420)
+
+    assert_plate_refused(app, api, owner_user, value)
+
+
+# --- chiffres non ASCII ---------------------------------------------------------------------------
+
+DIGITS_REFUSED = {
+    "arabes_indiens": "AB-123-CD".translate(ARABIC_DIGITS),
+    "arabes_etendus": "AB-" + u(0x6F1, 0x6F2, 0x6F3) + "-CD",
+    "devanagari": "AB-" + u(0x967, 0x968, 0x969) + "-CD",
+    "entre_parentheses": "AB-" + u(0x2474, 0x2475) + "-CD",  # NFKC -> "(1)(2)"
+    "chiffre_point": "AB-" + chr(0x2488) + "-CD",  # NFKC -> "1."
+    "fraction": "AB-" + chr(0xBD) + "-CD",  # NFKC -> "1" U+2044 "2"
+}
+DIGITS_NORMALISED = {
+    "pleine_chasse": ("AB-123-CD".translate(FULLWIDTH_DIGITS), "AB-123-CD"),
+    "exposants": ("AB-" + u(0xB9, 0xB2, 0xB3) + "-CD", "AB-123-CD"),
+    "cercles": ("AB-" + u(0x2460, 0x2461, 0x2462) + "-CD", "AB-123-CD"),
+    "math_gras": ("AB-" + u(0x1D7CF, 0x1D7D0, 0x1D7D1) + "-CD", "AB-123-CD"),
+}
+
+
+@pytest.mark.parametrize("value", DIGITS_REFUSED.values(), ids=DIGITS_REFUSED.keys())
+def test_round3_non_ascii_digits_not_folded_by_nfkc_are_refused(app, api, owner_user, client_user, value):
+    assert_plate_refused(app, api, owner_user, value)
+
+
+@pytest.mark.parametrize(("value", "expected"), DIGITS_NORMALISED.values(), ids=DIGITS_NORMALISED.keys())
+def test_round3_non_ascii_digits_folded_by_nfkc_are_normalised(
+    app, api, owner_user, client_user, value, expected
+):
+    assert_plate_normalised(app, api, owner_user, client_user, value, expected)
+
+
+# --- ligatures et caracteres de compatibilite NFKC ------------------------------------------------
+
+COMPAT_NORMALISED = {
+    "chiffre_romain_xii": ("AB-" + chr(0x216B), "AB-XII"),
+    "carre_kg": ("AB-12-" + chr(0x338F), "AB-12-KG"),
+    "ligature_fi": (chr(0xFB01) + "AT-500", "FIAT-500"),
+    "ligature_ffi": (chr(0xFB03) + "-1", "FFI-1"),
+    "carre_m2": ("AB-" + chr(0x33A1), "AB-M2"),  # m + exposant 2 -> "m2"
+    "signe_kelvin": (chr(0x212A) + "B-123-CD", "KB-123-CD"),
+    "s_long": (chr(0x17F) + "B-123-CD", "SB-123-CD"),
+    "i_sans_point": ("AB-123-C" + chr(0x131), "AB-123-CI"),  # str.upper(chr(0x131)) == "I"
+    "eszett": ("AB-123-" + chr(0xDF), "AB-123-SS"),  # majuscules : U+00DF -> "SS"
+    "a_cercle": (chr(0x24B6) + "B-123-CD", "AB-123-CD"),
+    "a_math_gras": (chr(0x1D400) + "B-123-CD", "AB-123-CD"),
+    "a_modificateur": (chr(0x1D2C) + "B-123-CD", "AB-123-CD"),
+    "tiret_pleine_chasse": ("AB" + chr(0xFF0D) + "123" + chr(0xFF0D) + "CD", "AB-123-CD"),
+    "petit_tiret": ("AB" + chr(0xFE63) + "123" + chr(0xFE63) + "CD", "AB-123-CD"),
+    "espace_insecable_interne": ("AB\xa0123", "AB 123"),
+    "espace_ideographique_interne": ("AB\N{IDEOGRAPHIC SPACE}123", "AB 123"),
+}
+COMPAT_REFUSED = {
+    "compte_de": "AB-" + chr(0x2100),  # NFKC -> "a/c"
+    "digraphe_dz_caron": "AB-" + chr(0x1C6),  # NFKC -> "dz" + caron -> hors liste blanche
+    "n_apostrophe": "AB-" + chr(0x149),  # NFKC -> U+02BC + "n"
+    "trait_union_unicode": "AB" + chr(0x2010) + "123",
+    "trait_union_insecable": "AB" + chr(0x2011) + "123",  # NFKC -> U+2010, toujours refuse
+    "signe_moins": "AB" + chr(0x2212) + "123",
+    "tiret_demi_cadratin": "AB" + chr(0x2013) + "123",
+    "tiret_cadratin": "AB\N{EM DASH}123",
+    "point_median": "AB" + chr(0xB7) + "123",
+    "soulignement_pleine_chasse": "AB" + chr(0xFF3F) + "123",  # NFKC -> "_"
+}
+
+
+@pytest.mark.parametrize(("value", "expected"), COMPAT_NORMALISED.values(), ids=COMPAT_NORMALISED.keys())
+def test_round3_compatibility_chars_are_stored_in_nfkc_uppercase_form(
+    app, api, owner_user, client_user, value, expected
+):
+    assert_plate_normalised(app, api, owner_user, client_user, value, expected)
+
+
+@pytest.mark.parametrize("value", COMPAT_REFUSED.values(), ids=COMPAT_REFUSED.keys())
+def test_round3_compatibility_chars_outside_whitelist_are_refused(app, api, owner_user, client_user, value):
+    assert_plate_refused(app, api, owner_user, value)
+
+
+# --- minuscules -----------------------------------------------------------------------------------
+
+LOWERCASE = {
+    "minuscules": ("ab-123-cd", "AB-123-CD"),
+    "casse_mixte": ("Ab-123-cD", "AB-123-CD"),
+    "minuscules_pleine_chasse": ("ab-123-cd".translate(FULLWIDTH_LOWER), "AB-123-CD"),
+    "chiffres_seuls": ("1234", "1234"),
+}
+
+
+@pytest.mark.parametrize(("value", "expected"), LOWERCASE.values(), ids=LOWERCASE.keys())
+def test_round3_lowercase_plates_are_uppercased(app, api, owner_user, client_user, value, expected):
+    assert_plate_normalised(app, api, owner_user, client_user, value, expected)
+
+
+def test_round3_replay_with_same_key_returns_the_normalised_plate(app, api, owner_user, client_user):
+    key = new_key()
+    body = {**VALID_BODY, "vehicle_plate": "ab-123-cd"}
+
+    first = api.create(owner_user, body, idem=key)
+    second = api.create(owner_user, body, idem=key)
+
+    assert first.status_code == second.status_code == 201, first.get_data(as_text=True)[:300]
+    assert first.get_json() == second.get_json()
+    assert second.get_json()["vehicle"]["plate"] == "AB-123-CD"
+    assert counts(app) == {"Contract": 1, "EscrowEvent": 1, "IdempotencyKey": 1}
+
+
+# --- longueur : 16 apres normalisation (et non avant) ---------------------------------------------
+
+LENGTH_ACCEPTED = {
+    "ascii_16": ("ABCDEFGH-1234567", "ABCDEFGH-1234567"),
+    "minuscules_16": ("abcdefgh-1234567", "ABCDEFGH-1234567"),
+    "pleine_chasse_16": ("ABCDEFGH-1234567".translate(FULLWIDTH_ALNUM), "ABCDEFGH-1234567"),
+    "ffi_x5_plus_1": (chr(0xFB03) * 5 + "1", "FFI" * 5 + "1"),  # 6 points de code -> 16
+    "romain_viii_x4": (chr(0x2167) * 4, "VIII" * 4),  # 4 -> 16
+    "romain_xii_x5": (chr(0x216B) * 5, "XII" * 5),  # 5 -> 15
+    "kg_x3": ("AB-123-CD-" + chr(0x338F) * 3, "AB-123-CD-KGKGKG"),  # 13 -> 16
+    "eszett_x8": (chr(0xDF) * 8, "SS" * 8),  # 8 -> 16 apres majuscules
+}
+LENGTH_REFUSED = {
+    "ascii_17": "ABCDEFGH-12345678",
+    "minuscules_17": "abcdefgh-12345678",
+    "pleine_chasse_17": "ABCDEFGH-12345678".translate(FULLWIDTH_ALNUM),
+    "ffi_x6": chr(0xFB03) * 6,  # 6 points de code -> 18 : VARCHAR(16) en base
+    "romain_viii_x5": chr(0x2167) * 5,  # 5 -> 20
+    "romain_xii_x6": chr(0x216B) * 6,  # 6 -> 18
+    "kg_x4": "AB-123-CD-" + chr(0x338F) * 4,  # 14 -> 18
+    "eszett_x9": chr(0xDF) * 9,  # 9 -> 18 apres majuscules
+    "tres_long": "A" * 17,
+}
+
+
+@pytest.mark.parametrize(("value", "expected"), LENGTH_ACCEPTED.values(), ids=LENGTH_ACCEPTED.keys())
+def test_round3_plate_of_16_chars_after_normalisation_is_accepted(
+    app, api, owner_user, client_user, value, expected
+):
+    assert len(expected) <= 16
+    assert_plate_normalised(app, api, owner_user, client_user, value, expected)
+
+
+@pytest.mark.parametrize("value", LENGTH_REFUSED.values(), ids=LENGTH_REFUSED.keys())
+def test_round3_plate_longer_than_16_after_normalisation_is_refused(app, api, owner_user, client_user, value):
+    """Expansion NFKC : la longueur doit etre controlee APRES normalisation, sinon 500 (VARCHAR(16))."""
+    assert_plate_refused(app, api, owner_user, value)
+
+
+# --- espaces, tabulations, plaque vide apres normalisation ----------------------------------------
+
+SPACES_ACCEPTED = {
+    "espaces_multiples": ("AB  123  CD", "AB  123  CD"),
+    "quatorze_espaces": ("A" + " " * 14 + "B", "A" + " " * 14 + "B"),
+    "espaces_ideographiques_internes": ("AB" + "\N{IDEOGRAPHIC SPACE}" * 2 + "123", "AB  123"),
+}
+SPACES_REFUSED = {
+    "quinze_espaces_17": "A" + " " * 15 + "B",
+    "tabulation": "AB\t123",
+    "saut_de_ligne": "AB\n123",
+    "retour_chariot": "AB\r123",
+    "tab_verticale": "AB\x0b123",
+    "saut_de_page": "AB\x0c123",
+}
+EMPTY_AFTER_NORMALISATION = {
+    "vide": "",
+    "espace": " ",
+    "trois_espaces": "   ",
+    "tiret": "-",
+    "tirets": "---",
+    "tiret_espace_tiret": "- -",
+    "seize_tirets": "-" * 16,
+    "espaces_ideographiques": "\N{IDEOGRAPHIC SPACE}" * 2,
+    "insecables": "\xa0\xa0",
+    "tiret_pleine_chasse": chr(0xFF0D),
+    "tirets_compat_et_espace": chr(0xFF0D) + "\N{IDEOGRAPHIC SPACE}" + chr(0xFE63),
+}
+
+
+@pytest.mark.parametrize(("value", "expected"), SPACES_ACCEPTED.values(), ids=SPACES_ACCEPTED.keys())
+def test_round3_internal_spaces_are_kept_as_normalised(app, api, owner_user, client_user, value, expected):
+    assert_plate_normalised(app, api, owner_user, client_user, value, expected)
+
+
+@pytest.mark.parametrize("value", SPACES_REFUSED.values(), ids=SPACES_REFUSED.keys())
+def test_round3_tabs_newlines_and_overlong_spaces_are_refused(app, api, owner_user, client_user, value):
+    assert_plate_refused(app, api, owner_user, value)
+
+
+@pytest.mark.parametrize("value", EMPTY_AFTER_NORMALISATION.values(), ids=EMPTY_AFTER_NORMALISATION.keys())
+def test_round3_plate_without_alnum_after_normalisation_is_refused(app, api, owner_user, client_user, value):
+    assert_plate_refused(app, api, owner_user, value)
+
+
+EDGE_WHITESPACE = {
+    "espaces_ascii": " ab-123-cd ",
+    "espaces_ideographiques": "\N{IDEOGRAPHIC SPACE}AB-123-CD\N{IDEOGRAPHIC SPACE}",
+    "saut_de_ligne_final": "AB-123-CD\n",  # piege classique : re.match(r"...$") accepte un "\n" final
+    "tabulation_initiale": "\tAB-123-CD",
+}
+
+
+@pytest.mark.parametrize("value", EDGE_WHITESPACE.values(), ids=EDGE_WHITESPACE.keys())
+def test_round3_edge_whitespace_is_refused_or_trimmed_never_stored(app, api, owner_user, client_user, value):
+    """La regle ne tranche pas le rognage des bords : 422, ou 201 avec exactement 'AB-123-CD'."""
+    before = counts(app)
+
+    resp = api.create(owner_user, {**VALID_BODY, "vehicle_plate": value})
+
+    assert_never_500(resp)
+    if resp.status_code == 201:
+        cid = resp.get_json()["id"]
+        assert resp.get_json()["vehicle"]["plate"] == "AB-123-CD"
+        assert stored_plate(app, cid) == "AB-123-CD"
+    else:
+        assert_error(resp, 422, "VALIDATION_ERROR")
+        assert counts(app) == before
+
+
+# --- le libelle n'est PAS soumis a la regle de la plaque ------------------------------------------
+
+
+def test_round3_label_is_not_normalised_like_the_plate(app, api, owner_user, client_user):
+    """Les deux champs partagent des validateurs : la normalisation de plaque ne doit pas fuir."""
+    label = "audi " + chr(0xFB01) + " " + "rs".translate(FULLWIDTH_LOWER) + " " + u(0x410, 0x412)
+
+    data = api.create_ok(owner_user, {**VALID_BODY, "vehicle_label": label, "vehicle_plate": "ab-123-cd"})
+
+    assert data["vehicle"]["label"] == label
+    assert data["vehicle"]["plate"] == "AB-123-CD"
+    assert api.get(data["id"], client_user).get_json()["vehicle"]["label"] == label
+
+
+# --- oracle : la regle produit, verifiee sur des entrees generees ---------------------------------
+
+PLATE_ALPHABET = [
+    *"AbZz09 -.",
+    "\t",
+    "\n",
+    "\xa0",
+    "\N{IDEOGRAPHIC SPACE}",
+    chr(0xFF21),  # A pleine chasse
+    chr(0xFF42),  # b pleine chasse
+    chr(0xFF11),  # 1 pleine chasse
+    chr(0xFF0D),  # tiret pleine chasse
+    chr(0xFB01),  # fi
+    chr(0xFB03),  # ffi
+    chr(0x216B),  # XII
+    chr(0x2167),  # VIII
+    chr(0x338F),  # kg
+    chr(0x212A),  # Kelvin
+    chr(0xDF),  # eszett
+    chr(0x131),  # i sans point
+    chr(0x17F),  # s long
+    chr(0xB2),  # exposant 2
+    chr(0x2460),  # 1 cercle
+    chr(0x2474),  # (1)
+    chr(0x1D400),  # A math gras
+    chr(0x410),  # A cyrillique
+    chr(0x430),  # a cyrillique
+    chr(0x39F),  # O grec
+    chr(0x663),  # 3 arabe
+    chr(0x5D0),  # alef
+    chr(0x2010),  # trait d'union
+    chr(0x2212),  # moins
+    "\N{COMBINING ACUTE ACCENT}",
+    "\N{ZERO WIDTH SPACE}",
+    "\xad",
+]
+
+
+@FUZZ
+@given(value=st.text(alphabet=st.sampled_from(PLATE_ALPHABET), max_size=20))
+def test_round3_fuzz_plate_matches_product_rule(app, api, owner_user, client_user, value):
+    before = counts(app)
+
+    resp = api.create(owner_user, {**VALID_BODY, "vehicle_plate": value})
+
+    assert_never_500(resp)
+    if value != value.strip():
+        # bords blancs : rognage non tranche par la regle, seul l'invariant de liste blanche compte
+        if resp.status_code == 201:
+            plate = resp.get_json()["vehicle"]["plate"]
+            assert is_whitelisted_plate(plate), ascii(plate)
+            assert plate == plate.strip(), ascii(plate)
+        else:
+            assert_error(resp, 422, "VALIDATION_ERROR")
+            assert counts(app) == before
+        return
+    expected = reference_plate(value)
+    if expected is None:
+        assert_error(resp, 422, "VALIDATION_ERROR")
+        assert counts(app) == before
+    else:
+        assert resp.status_code == 201, (ascii(value), resp.get_data(as_text=True)[:300])
+        cid = resp.get_json()["id"]
+        assert resp.get_json()["vehicle"]["plate"] == expected
+        assert stored_plate(app, cid) == expected

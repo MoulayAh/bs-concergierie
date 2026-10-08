@@ -12,12 +12,8 @@ logger = logging.getLogger("alembic.env")
 
 
 def get_engine():
-    try:
-        # Flask-SQLAlchemy < 3
-        return current_app.extensions["migrate"].db.get_engine()
-    except (TypeError, AttributeError):
-        # Flask-SQLAlchemy >= 3
-        return current_app.extensions["migrate"].db.engine
+    # Engine de l'app (conserve connect_args / search_path) ; get_engine() est deprecie.
+    return current_app.extensions["migrate"].db.engine
 
 
 def get_engine_url():

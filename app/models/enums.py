@@ -20,6 +20,15 @@ class ContractStatus(enum.StrEnum):
     SETTLED = "SETTLED"
 
 
+class DepositStatus(enum.StrEnum):
+    """Etat des fonds d'une caution (ENUM PostgreSQL `deposit_status`)."""
+
+    HELD = "HELD"
+    REFUNDED = "REFUNDED"
+    RELEASED = "RELEASED"
+    SETTLED = "SETTLED"
+
+
 class UserRole(enum.StrEnum):
     CLIENT = "client"
     OWNER = "owner"

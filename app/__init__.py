@@ -11,6 +11,7 @@ from app.cli import register_cli
 from app.domain.money import MAX_DEPOSIT_CENTS
 from app.errors import register_error_handlers
 from app.extensions import db, migrate
+from app.services.payments import SimulatedProvider
 
 DEFAULT_MAX_CONTENT_LENGTH = 10 * 1024 * 1024
 _DEV_DATABASE_URL = "postgresql+psycopg://escrow:escrow_dev@localhost:5432/escrow"
@@ -41,6 +42,7 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     db.init_app(app)
     migrate.init_app(app, db)
+    app.extensions["payment_provider"] = SimulatedProvider()
     register_error_handlers(app)
     app.register_blueprint(contracts_bp)
     register_cli(app)

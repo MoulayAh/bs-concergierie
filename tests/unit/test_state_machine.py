@@ -152,6 +152,48 @@ def test_funded_cancel_needs_both_parties_to_refund():
     assert step2.status is S.REFUNDED
 
 
+@pytest.mark.parametrize("actor", [OWNER, CLIENT], ids=lambda a: a.name)
+def test_funded_cancel_approved_twice_by_same_party_is_invalid_transition(actor):
+    first = transition(S.FUNDED, E.CANCEL, actor=actor)
+    assert first.status is S.FUNDED
+    assert first.signed_by == frozenset({actor})
+    with pytest.raises(InvalidTransition):
+        transition(S.FUNDED, E.CANCEL, actor=actor, signed_by=first.signed_by)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"), [(OWNER, CLIENT), (CLIENT, OWNER)], ids=["owner_first", "client_first"]
+)
+def test_funded_cancel_reaches_refunded_whatever_the_order(first, second):
+    step1 = transition(S.FUNDED, E.CANCEL, actor=first)
+    step2 = transition(S.FUNDED, E.CANCEL, actor=second, signed_by=step1.signed_by)
+    assert (step1.status, step2.status) == (S.FUNDED, S.REFUNDED)
+
+
+def test_funded_cancel_by_admin_is_forbidden_actor():
+    with pytest.raises(ForbiddenActor):
+        transition(S.FUNDED, E.CANCEL, actor=ADMIN)
+
+
+@pytest.mark.parametrize("actor", [CLIENT, ADMIN], ids=lambda a: a.name)
+def test_start_rental_is_reserved_to_the_owner(actor):
+    with pytest.raises(ForbiddenActor):
+        transition(S.FUNDED, E.START_RENTAL, actor=actor)
+
+
+@pytest.mark.parametrize("actor", [OWNER, ADMIN], ids=lambda a: a.name)
+def test_deposit_is_reserved_to_the_client(actor):
+    with pytest.raises(ForbiddenActor):
+        transition(S.AWAITING_DEPOSIT, E.DEPOSIT, actor=actor)
+
+
+@pytest.mark.parametrize("event", [E.DEPOSIT, E.START_RENTAL, E.CANCEL], ids=lambda e: e.name)
+def test_active_refuses_funding_events(event):
+    for actor in Party:
+        with pytest.raises(InvalidTransition):
+            transition(S.ACTIVE, event, actor=actor)
+
+
 def test_sign_report_without_retention_releases():
     money = {"deposit_cents": 500_000, "retained_cents": 0}
     first = transition(S.INSPECTION_PENDING, E.SIGN_REPORT, actor=OWNER, **money)

@@ -2,7 +2,7 @@
 
 from flask import Blueprint, Response, jsonify, request
 
-from app.schemas.contracts import CancelIn, CreateContractIn
+from app.schemas.contracts import CancelIn, CreateContractIn, DepositIn
 from app.schemas.parsing import (
     parse_idempotency_key,
     parse_json_body,
@@ -63,6 +63,25 @@ def get_events(contract_id: str) -> tuple[Response, int]:
 def sign_contract(contract_id: str) -> tuple[Response, int]:
     key = _idempotency_key(required=False)
     return _respond(service.sign_contract(current_user(), contract_id, idempotency_key=key))
+
+
+@bp.post("/<contract_id>/deposit")
+def deposit(contract_id: str) -> tuple[Response, int]:
+    key = _required_idempotency_key()
+    raw = parse_json_body(request.get_data(), request.mimetype)
+    data = validate_model(DepositIn, raw)
+    return _respond(service.deposit_funds(current_user(), contract_id, data, idempotency_key=key, body=raw))
+
+
+@bp.get("/<contract_id>/deposit")
+def get_deposit(contract_id: str) -> tuple[Response, int]:
+    return jsonify(service.get_deposit(current_user(), contract_id)), 200
+
+
+@bp.post("/<contract_id>/start")
+def start_rental(contract_id: str) -> tuple[Response, int]:
+    key = _idempotency_key(required=False)
+    return _respond(service.start_rental(current_user(), contract_id, idempotency_key=key))
 
 
 @bp.post("/<contract_id>/cancel")

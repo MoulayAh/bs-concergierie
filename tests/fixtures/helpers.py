@@ -31,6 +31,13 @@ VALID_BODY: dict[str, Any] = {
 }
 
 
+DEPOSIT_BODY: dict[str, Any] = {
+    "amount_cents": 2_500_000,
+    "currency": "EUR",
+    "payment_method": "demo_card_ok",
+}
+
+
 def new_token() -> str:
     return secrets.token_urlsafe(32)
 
@@ -89,7 +96,8 @@ class Api:
         self, user: TestUser | None, body: dict[str, Any] | None = None, idem: str | None = None, **kw: Any
     ):
         payload = dict(VALID_BODY) if body is None else body
-        return self.request("POST", "/api/contracts", user, body=payload, idem=idem or new_key(), **kw)
+        key = idem if idem is not None else new_key()
+        return self.request("POST", "/api/contracts", user, body=payload, idem=key, **kw)
 
     def create_ok(self, user: TestUser, body: dict[str, Any] | None = None) -> dict[str, Any]:
         resp = self.create(user, body)
@@ -103,11 +111,32 @@ class Api:
         return self.request("GET", f"/api/contracts/{contract_id}/events", user)
 
     def sign(self, contract_id: str, user: TestUser | None, idem: str | None = None):
-        return self.request("POST", f"/api/contracts/{contract_id}/sign", user, idem=idem or new_key())
+        key = idem if idem is not None else new_key()
+        return self.request("POST", f"/api/contracts/{contract_id}/sign", user, idem=key)
 
     def cancel(self, contract_id: str, user: TestUser | None, body: Any = None, idem: str | None = None):
         path = f"/api/contracts/{contract_id}/cancel"
-        return self.request("POST", path, user, body=body, idem=idem or new_key())
+        return self.request("POST", path, user, body=body, idem=idem if idem is not None else new_key())
+
+    def deposit(
+        self,
+        contract_id: str,
+        user: TestUser | None,
+        body: Any = None,
+        idem: str | None = None,
+        no_key: bool = False,
+    ):
+        """POST /deposit. Corps par defaut : DEPOSIT_BODY ; ``no_key=True`` omet l'Idempotency-Key."""
+        payload = dict(DEPOSIT_BODY) if body is None else body
+        key = None if no_key else (idem if idem is not None else new_key())
+        return self.request("POST", f"/api/contracts/{contract_id}/deposit", user, body=payload, idem=key)
+
+    def get_deposit(self, contract_id: str, user: TestUser | None):
+        return self.request("GET", f"/api/contracts/{contract_id}/deposit", user)
+
+    def start(self, contract_id: str, user: TestUser | None, idem: str | None = None):
+        key = idem if idem is not None else new_key()
+        return self.request("POST", f"/api/contracts/{contract_id}/start", user, idem=key)
 
 
 def assert_error(

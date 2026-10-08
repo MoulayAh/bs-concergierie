@@ -58,6 +58,9 @@ class Contract(Base):
     )
     owner_signed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     client_signed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    owner_cancel_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    client_cancel_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

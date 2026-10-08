@@ -184,7 +184,7 @@ def test_events_are_visible_to_both_parties_and_identical(api, owner_user, clien
     assert as_owner == as_client
 
 
-def test_events_table_is_append_only_across_transitions(api, app, owner_user, client_user):
+def test_each_transition_appends_events(api, app, owner_user, client_user):
     cid = api.create_ok(owner_user)["id"]
     before = count_rows(app, "EscrowEvent")
     api.sign(cid, client_user)

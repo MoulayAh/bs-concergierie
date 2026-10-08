@@ -59,16 +59,15 @@ def main() -> int:
             cmd, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env
         )
         output = ((proc.stdout or "") + (proc.stderr or "")).strip()
-        if "No module named" in proc.stderr:
-            status = "missing"
-        elif proc.returncode == 0 or (name.startswith("pytest") and proc.returncode == PYTEST_NO_TESTS):
+        if proc.returncode == 0 or (mode == "collect" and proc.returncode == PYTEST_NO_TESTS):
             status = "ok"
         else:
-            status = "fail"
+            # Un outil absent est un echec : une porte verte doit avoir tout verifie.
+            status = "missing" if "No module named" in (proc.stderr or "") else "fail"
             failed = True
         results.append({"step": name, "status": status, "tail": output[-2500:]})
         print(f"[{status.upper():7}] {name}")
-        if status == "fail":
+        if status != "ok":
             print(output[-2500:])
             if mode != "full":
                 break

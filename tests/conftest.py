@@ -24,8 +24,9 @@ Domaine pur (sans Flask ni DB) :
     ``ForbiddenActor``, ``InvalidAmount``.
 
 Fixtures de ce fichier
-  - ``app`` : application avec base PostgreSQL de test (env ``TEST_DATABASE_URL``), schema recree (drop_all +
-    create_all) avant CHAQUE test => isolation totale.
+  - ``app`` : application avec base PostgreSQL de test (env ``TEST_DATABASE_URL``),
+    schema PostgreSQL unique par session pytest (search_path), tables recreees
+    (drop_all + create_all) avant CHAQUE test dans ce schema.
   - ``api`` : ``tests.fixtures.helpers.Api`` (client de test Flask : JSON + Bearer + Idempotency-Key).
   - ``make_user(role, email=None, display_name=None)`` : fabrique un utilisateur et renvoie un ``TestUser``
     (``id``, ``email``, ``token`` en clair, ``headers``).
@@ -35,11 +36,16 @@ Les tests d'integration necessitent PostgreSQL : pas de skip, ils echouent si la
 """
 
 import os
+import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from flask import Flask
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.pool import NullPool
 
 from app import create_app
 from app.extensions import db
@@ -50,13 +56,53 @@ from tests.fixtures.helpers import Api, TestUser, new_token
 DEFAULT_TEST_DB = "postgresql+psycopg://escrow:escrow_test@localhost:5433/escrow_test"
 
 
+def _test_database_url() -> str:
+    return os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DB)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Garde-fou : refuse de tourner si la base ne se termine pas par ``_test`` (protege la base de dev)."""
+    database = make_url(_test_database_url()).database or ""
+    if not database.endswith("_test"):
+        raise pytest.UsageError(
+            f"TEST_DATABASE_URL pointe sur la base {database!r} : le nom doit se terminer par '_test' "
+            "(protection de la base de dev contre les suppressions)."
+        )
+
+
+@pytest.fixture(scope="session")
+def pg_schema() -> Iterator[str]:
+    """Schema PostgreSQL unique a cette execution pytest ; retire en fin de session (meme en echec)."""
+    schema = f"test_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+    admin = create_engine(_test_database_url(), poolclass=NullPool, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        yield schema
+    finally:
+        with admin.connect() as conn:
+            conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+            left = conn.execute(
+                text("SELECT count(*) FROM information_schema.schemata WHERE schema_name = :n"), {"n": schema}
+            ).scalar_one()
+        admin.dispose()
+        assert left == 0, f"schema de test {schema} non supprime"
+
+
 @pytest.fixture
-def app(tmp_path: Path) -> Iterator[Flask]:
+def app(tmp_path: Path, pg_schema: str) -> Iterator[Flask]:
+    # Toutes les connexions (threads et nouvelles connexions compris) passent par ce search_path :
+    # tables ET types enum sont crees dans le schema dedie, jamais dans ``public``.
+    engine_options: dict[str, Any] = {
+        "poolclass": NullPool,
+        "connect_args": {"options": f"-csearch_path={pg_schema}"},
+    }
     flask_app = create_app(
         {
             "TESTING": True,
             "SECRET_KEY": "test-secret-key-not-for-production-0123456789",
-            "DATABASE_URL": os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DB),
+            "DATABASE_URL": _test_database_url(),
+            "SQLALCHEMY_ENGINE_OPTIONS": engine_options,
             "UPLOAD_DIR": str(tmp_path / "uploads"),
             "MAX_DEPOSIT_CENTS": 50_000_000,
         }
@@ -68,6 +114,33 @@ def app(tmp_path: Path) -> Iterator[Flask]:
     with flask_app.app_context():
         db.session.remove()
         db.drop_all()
+
+
+@pytest.fixture
+def migrated_app(tmp_path: Path) -> Iterator[Flask]:
+    """Application dont le schema jetable dedie est VIDE : le test applique lui-meme les migrations."""
+    schema = f"mig_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+    admin = create_engine(_test_database_url(), poolclass=NullPool, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        flask_app = create_app(
+            {
+                "TESTING": True,
+                "SECRET_KEY": "test-secret-key-not-for-production-0123456789",
+                "DATABASE_URL": _test_database_url(),
+                "SQLALCHEMY_ENGINE_OPTIONS": {
+                    "poolclass": NullPool,
+                    "connect_args": {"options": f"-csearch_path={schema}"},
+                },
+                "UPLOAD_DIR": str(tmp_path / "uploads"),
+            }
+        )
+        yield flask_app
+    finally:
+        with admin.connect() as conn:
+            conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        admin.dispose()
 
 
 @pytest.fixture

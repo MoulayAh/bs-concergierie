@@ -9,7 +9,7 @@ from pydantic import BaseModel, ValidationError
 
 from app.domain.errors import InvalidAmount, ValidationFailed
 
-_AMOUNT_FIELD = "deposit_cents"
+_AMOUNT_FIELDS = frozenset({"deposit_cents", "amount_cents"})
 _MAX_LISTED_ERRORS = 20
 _MAX_FIELD_NAME = 64
 _IDEMPOTENCY_KEY_RE = re.compile(r"^[\x21-\x7e]{1,255}$")
@@ -50,7 +50,7 @@ def validate_model[M: BaseModel](model: type[M], data: object) -> M:
         details: dict[str, Any] = {"errors": listed}
         if len(errors) > _MAX_LISTED_ERRORS:
             details["truncated"] = True
-        if any(err["loc"] and err["loc"][0] == _AMOUNT_FIELD for err in errors):
+        if any(err["loc"] and err["loc"][0] in _AMOUNT_FIELDS for err in errors):
             raise InvalidAmount(
                 "La caution doit etre un entier en centimes compris entre 1 et 50000000",
                 details=details,

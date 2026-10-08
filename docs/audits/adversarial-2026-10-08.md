@@ -156,3 +156,42 @@ nombre de cles du corps avant validation.
   impact sur l'etat.
 - **Timing de l'authentification** : non pertinent (SHA-256 du jeton + recherche indexee, aucune
   comparaison de secret cote Python).
+
+---
+
+# F2 — depot / blocage de caution / annulation mutuelle (boucle 1)
+
+Tests : `tests/adversarial/test_f2_deposit.py` — **1 failed, 89 passed**.
+
+### F2-ADV-1 — cle d'idempotence partagee entre deux clients => 500 et blocage partage (Haute)
+
+- **Attaque** : client A depose sur son contrat avec `Idempotency-Key: shared-key-0001` (200). Client B
+  depose sur SON contrat avec la meme cle. Test : `test_two_clients_same_key_never_share_a_hold`.
+- **Resultat** : FAILLE. 500 `INTERNAL_ERROR` (`UniqueViolation uq_deposits_provider_ref`).
+- **Cause** : la table `idempotency_keys` est scopee par utilisateur, mais `deposit_funds` passe la cle
+  BRUTE a `provider.hold(...)`. `SimulatedProvider` (et tout vrai prestataire, ex. Stripe : cles par
+  compte marchand) renvoie alors la reference du blocage de A pour B. Seule la contrainte UNIQUE evite
+  qu'un contrat B soit FUNDED sur l'argent de A (et rembourse ensuite le blocage de A). Consequences :
+  500 (interdit), et deni de service sur le depot de B si la cle est previsible / rejouee.
+- **Correctif** : deriver la cle prestataire d'un scope serveur, ex.
+  `provider_key = sha256(f"{user_id}:{contract_id}:{idempotency_key}")` (ou l'id de la ligne
+  d'idempotence) ; en defense en profondeur, mapper `IntegrityError` sur `provider_ref` vers un 409
+  propre et ne jamais attacher un `provider_ref` deja lie a un autre contrat. Test de non-regression = ce test.
+
+### Attaques F2 repoussees (OK)
+
+| Zone | Attaques | Resultat |
+|------|----------|----------|
+| Montants | 1, 0, -2500000, 2**63, -(2**63), "2500000", 2500000.0, true, null, absent, +/-1 centime, liste, objet ; JSON brut 1e309, NaN, Infinity, 2500000e0, 2.5e6, hex, entier de 5000 chiffres, tronque, `[]`, `null`, vide | OK : 422, aucun `hold`, etat complet inchange |
+| Devise | CHF/USD sur contrat EUR, `eur`, `EUR `, XXX, "", null, 978 ; EUR sur contrat CHF | OK : 422 VALIDATION_ERROR |
+| Champs serveur | card_number, cvv, held/refunded/released_cents, status, deposit_status, provider_ref, contract_id, version | OK : 422 |
+| Corps | payment_method inconnu / 1 Mo, sans Idempotency-Key, mauvais Content-Type | OK |
+| Acces | loueur depose (403), tiers / UUID inconnu / id non UUID (404 identiques), GET /deposit tiers, sans jeton (401), tiers cancel/start | OK ; `provider_ref` jamais expose |
+| Double depot | etats DRAFT/FUNDED/CANCELLED (409), rejeu meme cle, conflit de cle, cle reutilisee sur autre contrat, panne 503 puis reessai, refus 402 puis autre cle, 5 depots concurrents (cles differentes / meme cle) | OK : un seul blocage, une ligne, version 4 |
+| Annulation FUNDED | re-cancel meme partie, `{"withdraw": true}`, champs forges, DELETE /cancel (405), depot, start (409 / 403), sign, rejeu meme cle | OK : FUNDED, HELD, 0 refund |
+| Remboursement | mutuel puis rejeu / re-cancel / depot / start ; panne prestataire au refund puis reessai | OK : 1 seul refund, ledger equilibre, etat intact apres 503 |
+| Courses (threads) | cancel/start, cancel x4 (2 par partie), cancel/cancel/start, deposit/cancel | OK : un seul etat final, refund 0 ou 1 selon l'etat |
+
+Observation (pas de test rouge) : apres un refund prestataire reussi, un echec du `commit` laisserait
+le contrat FUNDED/HELD alors que l'argent est rendu ; le reessai rappelle `refund` (idempotent par
+contrat d'interface). A couvrir par une reconciliation / outbox en F3.

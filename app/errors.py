@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from flask import Flask, Response, jsonify
+from sqlalchemy.exc import OperationalError
 from werkzeug.exceptions import HTTPException, MethodNotAllowed
 
 from app.domain.errors import DomainError
@@ -59,6 +60,12 @@ def register_error_handlers(app: Flask) -> None:
         if isinstance(exc, MethodNotAllowed) and exc.valid_methods:
             body.headers["Allow"] = ", ".join(sorted(exc.valid_methods))
         return body, status
+
+    @app.errorhandler(OperationalError)
+    def _db_unavailable(exc: OperationalError) -> tuple[Response, int]:
+        logger.error("Base de donnees indisponible", exc_info=exc)
+        _rollback()
+        return error_response(503, "SERVICE_UNAVAILABLE", "Service temporairement indisponible")
 
     @app.errorhandler(Exception)
     def _unexpected_error(exc: Exception) -> tuple[Response, int]:

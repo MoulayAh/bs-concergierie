@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -31,6 +32,8 @@ class EscrowEvent(Base):
         Enum(ContractStatus, name="contract_status", create_type=False), nullable=False
     )
     payload_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Donnees de l'evenement en clair (ex. {"reason": "..."}) ; NULL si aucune. Remplie a l'INSERT.
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
