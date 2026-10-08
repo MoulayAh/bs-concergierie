@@ -1,0 +1,66 @@
+{
+  "_comment": "Politique centrale du harness. Lue par tous les hooks. Les subagents ne peuvent PAS modifier ce fichier (.claude/** est protege).",
+
+  "allowed_subagents": [
+    "architect",
+    "backend-dev",
+    "frontend-dev",
+    "db-migrator",
+    "test-engineer",
+    "adversarial-tester",
+    "security-auditor",
+    "reviewer",
+    "Explore",
+    "Plan"
+  ],
+
+  "protected_for_everyone": [
+    ".env",
+    ".env.*",
+    ".git/*",
+    "*.pem",
+    "*.key",
+    "instance/*"
+  ],
+  "protected_exceptions": [".env.example"],
+
+  "main_session_ask": [".claude/*", "CLAUDE.md", "pyproject.toml", "requirements*.txt", "docker-compose.yml"],
+
+  "immutable_after_creation": ["migrations/versions/*"],
+
+  "agents": {
+    "architect": {
+      "write": ["docs/plans/*", "docs/adr/*"],
+      "bash": ["git status", "git log", "git diff"]
+    },
+    "backend-dev": {
+      "write": ["app/*"],
+      "write_deny": ["app/templates/*", "app/static/*", "app/models/*"],
+      "bash": ["python -m pytest", "pytest", "ruff check", "ruff format", "mypy", "git status", "git diff"]
+    },
+    "frontend-dev": {
+      "write": ["app/templates/*", "app/static/*"],
+      "bash": ["python -m pytest", "pytest", "git status", "git diff"]
+    },
+    "db-migrator": {
+      "write": ["app/models/*", "migrations/*"],
+      "bash": ["flask db migrate", "flask db upgrade", "flask db current", "flask db history", "alembic revision", "alembic upgrade", "alembic current", "alembic history", "python -m pytest", "pytest", "mypy", "git status", "git diff"]
+    },
+    "test-engineer": {
+      "write": ["tests/unit/*", "tests/integration/*", "tests/fixtures/*", "tests/conftest.py"],
+      "bash": ["python -m pytest", "pytest", "ruff check", "git status", "git diff"]
+    },
+    "adversarial-tester": {
+      "write": ["tests/adversarial/*", "docs/audits/*"],
+      "bash": ["python -m pytest", "pytest", "git status"]
+    },
+    "security-auditor": {
+      "write": ["docs/audits/*"],
+      "bash": ["python -m pytest", "pytest", "bandit", "pip-audit", "ruff check", "git status", "git diff", "git log"]
+    },
+    "reviewer": {
+      "write": ["docs/reviews/*"],
+      "bash": ["git status", "git diff", "git log", "git show", "python -m pytest", "pytest", "ruff check", "mypy"]
+    }
+  }
+}
