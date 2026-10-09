@@ -14,6 +14,7 @@ from app.models.enums import (
 from app.models.escrow_event import EscrowEvent
 from app.models.idempotency_key import IdempotencyKey
 from app.models.report import InspectionReport, ReportFile, ReportSignature
+from app.models.settlement_receipt import SettlementReceipt
 from app.models.user import User
 from app.models.user_key import UserKey
 
@@ -31,6 +32,7 @@ __all__ = [
     "ReportParty",
     "ReportSignature",
     "ReportStatus",
+    "SettlementReceipt",
     "User",
     "UserKey",
     "UserRole",

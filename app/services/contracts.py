@@ -6,6 +6,7 @@ Aucune route ne modifie ``status`` : tout passe par ``state_machine.transition``
 import hashlib
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,6 +22,7 @@ from app.domain.errors import (
     ResourceNotFound,
     ValidationFailed,
 )
+from app.domain.event_chain import GENESIS, compute_event_hash, format_timestamp, payload_fingerprint
 from app.domain.money import validate_deposit_cents
 from app.domain.state_machine import ContractStatus, Event, Party, transition
 from app.extensions import db
@@ -77,17 +79,49 @@ def load_for_party(user_id: uuid.UUID, contract_id: uuid.UUID, *, lock: bool) ->
     return contract, party
 
 
+@dataclass(frozen=True)
+class WrittenEvent:
+    seq: int
+    event_hash: str
+
+
 def write_event(
     contract_id: uuid.UUID,
     event: str,
     actor_id: uuid.UUID,
     from_status: StoredStatus | None,
     to_status: StoredStatus,
-    payload: object,
     data: dict[str, Any] | None = None,
-) -> None:
-    # clock_timestamp() (et non now()) : l'ordre des evenements suit l'ordre reel d'ecriture,
-    # donc l'ordre d'acquisition du verrou, pas celui de debut de transaction.
+) -> WrittenEvent:
+    """Ajoute un maillon a la chaine du contrat (seq, prev_hash, event_hash) sous le verrou du contrat.
+
+    Le verrou est deja pris par l'appelant ; le reprendre est sans effet dans la meme transaction et
+    protege les ecritures isolees (ex. ``deposit_failed``). ``created_at`` est fixe ici, en UTC et en
+    microsecondes, car il entre dans l'empreinte.
+    """
+    db.session.execute(select(Contract.id).where(Contract.id == contract_id).with_for_update())
+    last = db.session.execute(
+        select(EscrowEvent.seq, EscrowEvent.event_hash)
+        .where(EscrowEvent.contract_id == contract_id)
+        .order_by(EscrowEvent.seq.desc())
+        .limit(1)
+    ).first()
+    seq, prev_hash = (last[0] + 1, last[1].strip()) if last is not None else (1, GENESIS)
+    created_at = datetime.now(UTC)
+    payload_hash = payload_fingerprint(data)  # calcule sur le payload exact stocke
+    event_hash = compute_event_hash(
+        prev_hash,
+        {
+            "contract_id": str(contract_id),
+            "seq": seq,
+            "event": event,
+            "actor_id": str(actor_id),
+            "from_status": from_status.value if from_status is not None else None,
+            "to_status": to_status.value,
+            "payload_hash": payload_hash,
+            "created_at": format_timestamp(created_at),
+        },
+    )
     db.session.execute(
         insert(EscrowEvent).values(
             contract_id=contract_id,
@@ -95,11 +129,15 @@ def write_event(
             actor_id=actor_id,
             from_status=from_status,
             to_status=to_status,
-            payload_hash=fingerprint(payload),
+            payload_hash=payload_hash,
             payload=data,
-            created_at=func.clock_timestamp(),
+            seq=seq,
+            prev_hash=prev_hash,
+            event_hash=event_hash,
+            created_at=created_at,
         )
     )
+    return WrittenEvent(seq, event_hash)
 
 
 def create_contract(
@@ -138,7 +176,6 @@ def create_contract(
         owner_id,
         None,
         StoredStatus.DRAFT,
-        {"op": "create", "request": request_hash},
     )
     outcome = Outcome(201, contract_to_dict(contract))
     idempotency.record(idempotency_key, owner_id, request_hash, outcome)
@@ -206,7 +243,6 @@ def _apply_event(
         user_id,
         previous,
         contract.status,
-        {"op": event.value, "actor": str(user_id), "body": body, "version": contract.version},
         _event_data(event, body),
     )
     outcome = Outcome(200, contract_to_dict(contract, deposit))
@@ -306,7 +342,7 @@ def deposit_funds(user: User, raw_id: str, data: DepositIn, *, idempotency_key: 
                 user_id,
                 previous,
                 previous,
-                {"op": "deposit_failed", "actor": str(user_id), "code": exc.code},
+                {"code": exc.code},
             )
             db.session.commit()
         except Exception:  # noqa: BLE001 - ne jamais masquer l'erreur 402/503 d'origine
@@ -335,7 +371,6 @@ def deposit_funds(user: User, raw_id: str, data: DepositIn, *, idempotency_key: 
             user_id,
             previous,
             contract.status,
-            {"op": "deposit", "actor": str(user_id), "body": body, "version": contract.version},
         )
         deposit = _locked_deposit(contract_id)
         outcome = Outcome(200, contract_to_dict(contract, deposit))
@@ -387,19 +422,21 @@ def get_contract(user: User, raw_id: str) -> dict[str, Any]:
 def list_events(user: User, raw_id: str) -> list[dict[str, Any]]:
     contract, _ = load_for_party(user.id, parse_id(raw_id), lock=False)
     rows = db.session.scalars(
-        select(EscrowEvent)
-        .where(EscrowEvent.contract_id == contract.id)
-        .order_by(EscrowEvent.created_at, EscrowEvent.id)
+        select(EscrowEvent).where(EscrowEvent.contract_id == contract.id).order_by(EscrowEvent.seq)
     ).all()
     return [
         {
+            "contract_id": str(row.contract_id),
+            "seq": row.seq,
             "event": row.event,
             "actor_id": str(row.actor_id),
             "from_status": row.from_status.value if row.from_status is not None else None,
             "to_status": row.to_status.value,
             "payload_hash": row.payload_hash,
             "payload": row.payload,
-            "created_at": row.created_at.astimezone(UTC).isoformat(),
+            "created_at": format_timestamp(row.created_at),
+            "prev_hash": row.prev_hash.strip(),
+            "event_hash": row.event_hash.strip(),
         }
         for row in rows
     ]

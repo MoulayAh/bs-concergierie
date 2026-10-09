@@ -45,6 +45,10 @@ VALID: dict[tuple[S, E], tuple[frozenset[Party], bool, S]] = {
     (S.INSPECTION_PENDING, E.CONTEST): (BOTH, False, S.DISPUTED),
     (S.DISPUTED, E.RESOLVE): (frozenset({ADMIN}), False, S.SETTLED),
 }
+# Charge meme si l'evenement n'existe pas encore (TDD) : test_revise_return_report_event_exists reste rouge.
+_REVISE = getattr(E, "REVISE_RETURN_REPORT", None)
+if _REVISE is not None:
+    VALID[(S.INSPECTION_PENDING, _REVISE)] = (frozenset({OWNER}), False, S.INSPECTION_PENDING)
 
 ALL_PAIRS = list(itertools.product(S, E))
 INVALID_PAIRS = [pair for pair in ALL_PAIRS if pair not in VALID]
@@ -60,7 +64,14 @@ def test_matrix_covers_every_state_and_event():
     assert len(ALL_PAIRS) == len(S) * len(E)
     assert len(VALID_PAIRS) + len(INVALID_PAIRS) == len(ALL_PAIRS)
     assert len(S) == 10
-    assert len(E) == 8
+    assert len(E) == 9
+
+
+def test_revise_return_report_event_exists_and_is_valid_only_while_inspection_pending():
+    assert E("revise_return_report").name == "REVISE_RETURN_REPORT"
+    assert [pair for pair in VALID_PAIRS if pair[1].value == "revise_return_report"] == [
+        (S.INSPECTION_PENDING, E("revise_return_report"))
+    ]
 
 
 @pytest.mark.parametrize(("status", "event"), VALID_PAIRS, ids=lambda v: v.name)

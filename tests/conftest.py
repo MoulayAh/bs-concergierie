@@ -5,7 +5,9 @@ Interfaces supposees (backend-dev / db-migrator doivent s'y aligner) :
 Application
   - ``app.create_app(config: dict | None = None) -> flask.Flask``. Cles de config utilisees par les tests :
     ``TESTING``, ``SECRET_KEY``, ``DATABASE_URL`` (URL SQLAlchemy PostgreSQL de test),
-    ``UPLOAD_DIR``, ``MAX_DEPOSIT_CENTS``.
+    ``UPLOAD_DIR``, ``MAX_DEPOSIT_CENTS``, ``SERVER_SIGNING_KEY`` (F4 : base64 de la graine privee Ed25519
+    de 32 octets du serveur ; cle de test generee une fois par session dans tests/fixtures/release.py ;
+    ``create_app`` refuse de demarrer sans elle).
   - ``app.extensions.db`` : instance Flask-SQLAlchemy (``create_all`` / ``drop_all`` / ``session``).
   - Commande CLI ``flask seed-demo`` (idempotente) : cree au moins un utilisateur ``owner`` et un ``client``.
   - ``app.security.auth.hash_token(token: str) -> str`` : hachage du jeton Bearer stocke dans
@@ -52,6 +54,7 @@ from app.extensions import db
 from app.models import User
 from app.security.auth import hash_token
 from tests.fixtures.helpers import Api, TestUser, new_token
+from tests.fixtures.release import SERVER_KEY_B64
 
 DEFAULT_TEST_DB = "postgresql+psycopg://escrow:escrow_test@localhost:5433/escrow_test"
 
@@ -105,6 +108,7 @@ def app(tmp_path: Path, pg_schema: str) -> Iterator[Flask]:
             "SQLALCHEMY_ENGINE_OPTIONS": engine_options,
             "UPLOAD_DIR": str(tmp_path / "uploads"),
             "MAX_DEPOSIT_CENTS": 50_000_000,
+            "SERVER_SIGNING_KEY": SERVER_KEY_B64,
         }
     )
     with flask_app.app_context():
@@ -134,6 +138,7 @@ def migrated_app(tmp_path: Path) -> Iterator[Flask]:
                     "connect_args": {"options": f"-csearch_path={schema}"},
                 },
                 "UPLOAD_DIR": str(tmp_path / "uploads"),
+                "SERVER_SIGNING_KEY": SERVER_KEY_B64,
             }
         )
         yield flask_app

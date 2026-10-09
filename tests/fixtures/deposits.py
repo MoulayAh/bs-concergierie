@@ -121,10 +121,15 @@ class RecordingProvider:
     ``hold`` est idempotent sur la cle : meme cle => meme reference.
     """
 
-    def __init__(self, fail_next_holds: int = 0) -> None:
+    def __init__(self, fail_next_holds: int = 0, fail_next_settles: int = 0) -> None:
         self.fail_next_holds = fail_next_holds
+        self.fail_next_settles = fail_next_settles
         self.hold_calls: list[tuple[int, str, str, str]] = []
         self.refund_calls: list[str] = []
+        # F4 : tous les appels (y compris ceux qui echouent) puis les reglements REUSSIS par cle.
+        self.settle_calls: list[tuple[str, int, int, str]] = []
+        self.settled: dict[str, tuple[str, int, int, str]] = {}
+        self._held_by_ref: dict[str, int] = {}
         self._lock = threading.Lock()
 
     def hold(self, amount: int, currency: str, method: str, key: str) -> str:
@@ -139,11 +144,46 @@ class RecordingProvider:
             raise PaymentDeclined("Paiement refuse")
         if method == "demo_provider_down":
             raise PaymentUnavailable("Prestataire de paiement indisponible")
-        return "sim_" + hashlib.sha256(key.encode()).hexdigest()[:24]
+        ref = "sim_" + hashlib.sha256(key.encode()).hexdigest()[:24]
+        with self._lock:
+            self._held_by_ref[ref] = amount
+        return ref
 
     def refund(self, ref: str) -> None:
         with self._lock:
             self.refund_calls.append(ref)
+
+    def settle(self, ref: str, *, release_cents: int, capture_cents: int, key: str) -> str:
+        """Libere ``release_cents`` au client et verse ``capture_cents`` au loueur ; idempotent par cle.
+
+        Panne injectable : ``fail_next_settles`` appels levent ``PaymentUnavailable`` sans rien regler.
+        Meme cle et memes montants => meme reference ; meme cle et montants differents => ValueError.
+        """
+        from app.domain.errors import PaymentUnavailable
+
+        with self._lock:
+            self.settle_calls.append((ref, release_cents, capture_cents, key))
+            if self.fail_next_settles > 0:
+                self.fail_next_settles -= 1
+                raise PaymentUnavailable("Prestataire de paiement indisponible")
+            previous = self.settled.get(key)
+            if previous is not None:
+                if previous[:3] != (ref, release_cents, capture_cents):
+                    raise ValueError("cle d'idempotence reutilisee avec des montants differents")
+                return previous[3]
+            if release_cents < 0 or capture_cents < 0:
+                raise ValueError("montant negatif")
+            held = self._held_by_ref.get(ref)
+            if held is not None and release_cents + capture_cents != held:
+                raise ValueError("la somme ne correspond pas au montant bloque")
+            settlement_ref = "sim_set_" + hashlib.sha256(key.encode()).hexdigest()[:24]
+            self.settled[key] = (ref, release_cents, capture_cents, settlement_ref)
+            return settlement_ref
+
+    @property
+    def paid_out_cents(self) -> int:
+        """Total effectivement regle (une fois par cle) : doit valoir la caution apres liberation."""
+        return sum(r + c for _, r, c, _ in self.settled.values())
 
     @property
     def distinct_refs_held(self) -> int:

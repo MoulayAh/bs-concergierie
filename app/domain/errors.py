@@ -72,6 +72,13 @@ class PaymentUnavailable(DomainError):
     http_status = 503
 
 
+class SettlementConflict(DomainError):
+    """Le prestataire refuse un reglement : meme cle deja utilisee avec d'autres montants (incident grave)."""
+
+    code = "SETTLEMENT_CONFLICT"
+    http_status = 409
+
+
 class SignatureInvalid(DomainError):
     code = "SIGNATURE_INVALID"
     http_status = 422

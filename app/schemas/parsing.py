@@ -50,7 +50,10 @@ def validate_model[M: BaseModel](model: type[M], data: object) -> M:
         details: dict[str, Any] = {"errors": listed}
         if len(errors) > _MAX_LISTED_ERRORS:
             details["truncated"] = True
-        if any(err["loc"] and err["loc"][0] in _AMOUNT_FIELDS for err in errors):
+        if any(
+            err["loc"] and err["loc"][0] in _AMOUNT_FIELDS and err["type"] != "extra_forbidden"
+            for err in errors
+        ):
             raise InvalidAmount(
                 "La caution doit etre un entier en centimes compris entre 1 et 50000000",
                 details=details,
@@ -61,8 +64,10 @@ def validate_model[M: BaseModel](model: type[M], data: object) -> M:
 def require_idempotency_key(value: str | None) -> str:
     if value is None:
         raise ValidationFailed("En-tete Idempotency-Key requis")
-    if not _IDEMPOTENCY_KEY_RE.fullmatch(value):
-        raise ValidationFailed("Idempotency-Key invalide (1 a 255 caracteres ASCII imprimables)")
+    if not _IDEMPOTENCY_KEY_RE.fullmatch(value) or value.startswith("settle:"):
+        raise ValidationFailed(
+            "Idempotency-Key invalide (1 a 255 caracteres ASCII imprimables, prefixe 'settle:' reserve)"
+        )
     return value
 
 

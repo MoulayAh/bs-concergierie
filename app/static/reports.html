@@ -65,7 +65,23 @@
     <button id="sign" type="button">Signer l'empreinte</button>
   </div>
   <ul id="keys"></ul>
+  <div id="retention-warning" class="warn" role="alert" hidden></div>
   <p>Signatures : <span id="sigs">-</span></p>
+</section>
+
+<section id="final" hidden>
+  <h2>Liberation de la caution <span id="final-status" class="badge"></span></h2>
+  <p id="final-badge" class="vbadge" role="status"></p>
+  <table>
+    <tbody>
+      <tr><th>Caution</th><td id="f-deposit">-</td></tr>
+      <tr><th>Rendu au client</th><td id="f-client">-</td></tr>
+      <tr><th>Retenu par le loueur</th><td id="f-owner">-</td></tr>
+      <tr><th>Statut de la caution</th><td id="f-dstatus">-</td></tr>
+    </tbody>
+  </table>
+  <p>Empreinte de la quittance : <code id="f-hash">-</code></p>
+  <button id="dl-receipt" type="button">Telecharger la quittance (JSON)</button>
 </section>
 
 <section>

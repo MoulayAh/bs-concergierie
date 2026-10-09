@@ -80,9 +80,11 @@ def test_ledger_rejects_negative_columns_even_when_sum_balances(app, funded, ass
 @pytest.mark.parametrize(
     "assignment",
     [
-        "held_cents = 0, refunded_cents = amount_cents",
-        "held_cents = 0, released_cents = amount_cents",
-        "held_cents = 0, released_cents = 1000, retained_cents = amount_cents - 1000",
+        "status = 'REFUNDED', held_cents = 0, refunded_cents = amount_cents",
+        "status = 'RELEASED', held_cents = 0, released_cents = amount_cents, "
+        "settled_at = now(), settlement_ref = 'rel_ledger_1'",
+        "status = 'SETTLED', held_cents = 0, released_cents = 1000, retained_cents = amount_cents - 1000, "
+        "settled_at = now(), settlement_ref = 'rel_ledger_2'",
     ],
 )
 def test_ledger_accepts_balanced_updates(app, funded, assignment):

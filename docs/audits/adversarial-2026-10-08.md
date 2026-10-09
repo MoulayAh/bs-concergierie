@@ -245,3 +245,43 @@ parallele).
 | Acteurs | client create/update/finalize/supersede (403), loueur supprime photo client (403), tiers / IDOR (404 identiques), sans jeton (401) | OK |
 | Metier | retenue != 0 au depart, retenue > caution, kilometrage qui recule, start sans signature client, rapport SIGNED intouchable | OK |
 | Courses | upload x4 vs gel, 2e signature vs supersede, remplacement apres signature client | OK : empreinte = fichiers, aucun orphelin, jamais SIGNED remplace, historique conserve |
+
+# F4 — liberation de la caution (boucle 1, 2026-10-09)
+
+Tests : `tests/adversarial/test_f4_release.py` — **2 failed, 35 passed**.
+
+### F4-ADV-1 — reglement execute mais non confirme, puis revision : prestataire paye, base HELD (Haute)
+
+- **Attaque** : le prestataire execute `settle` puis la reponse se perd (timeout => 503). Le loueur
+  remplace alors le retour (`supersede` 201), retenue 0, gel, double signature : la 2e signature renvoie
+  503 a chaque essai (meme cle `settle:<deposit_id>`, autres montants => refus du prestataire). Test :
+  `test_ambiguous_settle_then_revision_never_diverges_from_provider`.
+- **Resultat** : FAILLE. Argent deja ventile chez le prestataire (2 380 000 / 120 000), depot `HELD` en
+  base, contrat bloque en INSPECTION_PENDING sans issue : etat incoherent, caution jamais liberable.
+- **Correctif** : journaliser la tentative (montants + cle) dans une transaction committee AVANT
+  l'appel ; tant qu'une tentative existe, refuser `supersede`/`update` du retour (409) et ne reessayer
+  qu'avec les montants journalises ; a defaut, interroger le prestataire (statut de la cle) pour
+  reconcilier avant tout nouveau reglement.
+
+### F4-ADV-2 — champ `payload` de l'export d'evenements hors chaine (Basse)
+
+- **Attaque** : dans l'export `/events`, remplacer `payload.report_id/report_hash` de l'evenement de
+  liberation ; `verify_receipt --events` accepte. Test : `test_forged_event_exports_rejected_offline`.
+- **Resultat** : FAILLE. `payload` (colonne JSON) n'entre ni dans `payload_hash` (calcule sur un autre
+  dictionnaire) ni dans `event_hash` : un export retouche reste « verifie » et peut afficher une
+  empreinte de rapport mensongere.
+- **Correctif** : `payload_hash = sha256(canonique(payload stocke))` et le verifier dans `verify_chain`
+  (ou retirer `payload` de l'export) ; dans `verify_receipt`, exiger
+  `events[-1].payload.report_hash == return_report.hash`.
+
+### Attaques F4 repoussees (OK)
+
+| Zone | Attaques | Resultat |
+|------|----------|----------|
+| Rejeu | signature du depart (hash/kind croises), autre contrat, revision supersedee, client qui resigne | OK : 422 SIGNATURE_INVALID / 409, rien ne change |
+| Retenue | loueur qui passe la retenue a 100 % apres signature client ; injection `retained_cents`, `release_cents`, `claimed_retention_cents`, `report_hash`, `deposit_cents`, `party` | OK : nouvelle signature client exigee ; 422, retenue figee seule appliquee |
+| Concurrence | 4x meme cle, 5x cles differentes, 2+2 premieres signatures simultanees, panne + 6 reessais paralleles, 3 pannes + reessais meme cle | OK : un seul settle reussi, une quittance, rendu + retenu = caution |
+| Terminal | cancel x2, deposit, start, sign, supersede retour/depart, finalize, update, create, resignature, upload (RELEASED et SETTLED) | OK : 409, etat, quittance et prestataire inchanges |
+| Preuve | 1 centime (avec/sans hash), empreinte, ordre des signatures, cle client remplacee, signature/contenu d'une autre quittance, mauvaise cle serveur ; export supprime/reordonne/acteur/statut/autre contrat/vide, CLI | OK : ReceiptInvalid / code 1 |
+| Acces | /receipt tiers, sans jeton, UUID fantome, avant liberation ; /api/server-key POST/PUT/DELETE ; `SERVER_SIGNING_KEY` dans `app.config` | OK : 404/401/405, aucune fuite de la graine |
+| Chaine | 6 depots en panne + 2 valides en parallele | OK : seq 1..n, chaine lineaire, un seul FUNDED |

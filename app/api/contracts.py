@@ -11,6 +11,7 @@ from app.schemas.parsing import (
 )
 from app.security.auth import authenticate_request, current_user
 from app.services import contracts as service
+from app.services import release
 from app.services.idempotency import Outcome, fingerprint
 
 bp = Blueprint("contracts", __name__, url_prefix="/api/contracts")
@@ -57,6 +58,11 @@ def get_contract(contract_id: str) -> tuple[Response, int]:
 @bp.get("/<contract_id>/events")
 def get_events(contract_id: str) -> tuple[Response, int]:
     return jsonify({"events": service.list_events(current_user(), contract_id)}), 200
+
+
+@bp.get("/<contract_id>/receipt")
+def get_receipt(contract_id: str) -> tuple[Response, int]:
+    return jsonify(release.get_receipt(current_user(), contract_id)), 200
 
 
 @bp.post("/<contract_id>/sign")

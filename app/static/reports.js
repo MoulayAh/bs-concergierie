@@ -157,7 +157,6 @@
   }
 
   async function signReport() {
-    if ($("kind").value !== "checkout") throw new Error("Seul le rapport checkout se signe");
     if (!report || !report.report_hash) throw new Error("Rapport non fige : rien a signer");
     if (!(await detectEd25519())) throw new Error("Ed25519 indisponible dans ce navigateur");
     const key = await refreshLocalKey();
@@ -167,10 +166,103 @@
     if (local !== null && local !== report.report_hash) throw new Error("Empreinte locale differente : signature refusee");
     const contractId = $("contract").value.trim().toLowerCase();
     const msg = enc.encode("luxe-escrow:report:v1:" + contractId + ":" + $("kind").value + ":" + report.report_hash);
+    if ($("kind").value === "return") {
+      const c = report.claimed_retention_cents;
+      if (!Number.isInteger(c) || c < 0) throw new Error("Retenue invalide dans le rapport : signature refusee");
+      const q = c > 0
+        ? "En signant, vous acceptez une retenue de " + centsToEuros(c) + " EUR sur la caution. Signer ?"
+        : "Aucune retenue : la caution sera integralement rendue au client. Signer ?";
+      if (!window.confirm(q)) return;
+    }
     const sig = await crypto.subtle.sign({ name: "Ed25519" }, key, msg);
-    await api("POST", base() + "/signatures", { json: { signature: b64(sig) }, idem: true });
+    const res = await api("POST", base() + "/signatures", { json: { signature: b64(sig) }, idem: true });
     info("Signature enregistree.");
     await load();
+    if ($("kind").value === "return") {
+      if (res && (res.receipt || res.canonical_json)) await showFinal(res);
+      else await loadReceipt();
+    }
+  }
+
+  // ---------- ecran final : liberation et quittance ----------
+  let lastReceipt = null;
+  function cid() { return $("contract").value.trim().toLowerCase(); }
+  function fromB64(s) {
+    if (typeof s !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(s)) throw new Error("base64 invalide");
+    const bin = atob(s); const a = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+    return a;
+  }
+  function eur(c) { return Number.isInteger(c) ? centsToEuros(c) + " EUR" : "-"; }
+  function setBadge(ok, text) {
+    const el = $("final-badge");
+    el.textContent = text; el.className = "vbadge " + (ok ? "good" : "bad");
+  }
+  // renvoie {ok, reason}
+  async function verifyReceipt(r) {
+    if (typeof r.canonical_json !== "string" || typeof r.receipt_hash !== "string") return { ok: false, reason: "quittance incomplete" };
+    const h = hex(await crypto.subtle.digest("SHA-256", enc.encode(r.canonical_json)));
+    if (h !== r.receipt_hash) return { ok: false, reason: "empreinte recalculee differente de receipt_hash" };
+    let parsed;
+    try { parsed = JSON.parse(r.canonical_json); } catch (_) { return { ok: false, reason: "JSON canonique illisible" }; }
+    if (!parsed || String(parsed.contract_id).toLowerCase() !== cid()) return { ok: false, reason: "quittance d'un autre contrat" };
+    if (!(await detectEd25519())) return { ok: false, reason: "Ed25519 indisponible : signature serveur non verifiee" };
+    const k = await api("GET", "/api/server-key");
+    if (!k || typeof k.public_key !== "string") return { ok: false, reason: "cle du serveur indisponible" };
+    try {
+      const pub = fromB64(k.public_key);
+      if (pub.length !== 32) return { ok: false, reason: "cle publique du serveur invalide" };
+      const key = await crypto.subtle.importKey("raw", pub, { name: "Ed25519" }, false, ["verify"]);
+      const sig = fromB64(r.server_signature);
+      const good = await crypto.subtle.verify({ name: "Ed25519" }, key, sig,
+        enc.encode("luxe-escrow:receipt:v1:" + r.receipt_hash));
+      return good ? { ok: true } : { ok: false, reason: "signature du serveur invalide" };
+    } catch (e) { return { ok: false, reason: "verification impossible : " + e.message }; }
+  }
+  async function showFinal(data) {
+    const r = data.receipt || data;
+    lastReceipt = null;
+    let parsed = null;
+    try { parsed = JSON.parse(r.canonical_json); } catch (_) { parsed = null; }
+    const funds = data.funds || null;
+    const contract = data.contract || data;
+    const deposit = funds ? funds.amount_cents : (parsed && parsed.deposit_cents);
+    const client = parsed ? parsed.released_to_client_cents : (funds && funds.released_cents);
+    const owner = parsed ? parsed.retained_by_owner_cents : (funds && funds.retained_cents);
+    $("final").hidden = false;
+    $("final-status").textContent = String((contract && contract.status) || (parsed && parsed.outcome) || "");
+    $("f-deposit").textContent = eur(deposit);
+    $("f-client").textContent = eur(client);
+    $("f-owner").textContent = eur(owner);
+    $("f-dstatus").textContent = funds ? String(funds.deposit_status) : "-";
+    $("f-hash").textContent = String(r.receipt_hash || "-");
+    setBadge(false, "Verification en cours...");
+    $("dl-receipt").disabled = true;
+    const v = await verifyReceipt(r);
+    // coherence : la ventilation affichee doit egaler celle de la quittance signee
+    if (v.ok && funds && parsed && (funds.released_cents !== parsed.released_to_client_cents
+      || funds.retained_cents !== parsed.retained_by_owner_cents)) {
+      v.ok = false; v.reason = "montants du serveur differents de la quittance signee";
+    }
+    setBadge(v.ok, v.ok ? "Quittance verifiee (empreinte et signature du serveur)"
+      : "QUITTANCE NON VERIFIEE : " + v.reason);
+    lastReceipt = { canonical_json: r.canonical_json, receipt: parsed, receipt_hash: r.receipt_hash,
+      server_signature: r.server_signature };
+    $("dl-receipt").disabled = false;
+  }
+  async function loadReceipt() {
+    $("final").hidden = true;
+    if ($("kind").value !== "return") return;
+    try { await showFinal(await api("GET", "/api/contracts/" + encodeURIComponent($("contract").value.trim()) + "/receipt")); }
+    catch (e) { if (!(e.apiError && e.apiError.code === "NOT_FOUND")) throw e; }
+  }
+  function renderRetentionWarning() {
+    const el = $("retention-warning");
+    const c = report && report.claimed_retention_cents;
+    const on = $("kind").value === "return" && report && report.status === "FROZEN" && Number.isInteger(c) && c > 0;
+    el.hidden = !on;
+    el.textContent = on ? "Retenue demandee par le loueur : " + centsToEuros(c) +
+      " EUR. En signant, vous acceptez cette retenue ; le reste de la caution est rendu au client." : "";
   }
 
   // ---------- rapport ----------
@@ -305,7 +397,9 @@
     render();
     await renderHash();
     await refreshLocalKey();
+    renderRetentionWarning();
     if (report) await renderHistory(); else $("history").textContent = "";
+    await loadReceipt();
   }
 
   // ---------- evenements ----------
@@ -342,6 +436,15 @@
   $("genkey").addEventListener("click", () => guard(genKey));
   $("listkeys").addEventListener("click", () => guard(listKeys));
   $("sign").addEventListener("click", () => guard(signReport));
+  $("dl-receipt").addEventListener("click", () => {
+    if (!lastReceipt) return;
+    const blob = new Blob([JSON.stringify(lastReceipt, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "quittance-" + cid() + ".json";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  });
 
   detectEd25519().then(() => render());
 })();

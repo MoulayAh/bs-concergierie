@@ -7,10 +7,10 @@ le service les convertit par valeur.
 import enum
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
-from app.domain.errors import InvalidTransition
+from app.domain.errors import InvalidTransition, ValidationFailed
 
 SCHEMA: Final = "luxe-escrow/report/v1"
 SIGNING_PREFIX: Final = b"luxe-escrow:report:v1:"
@@ -56,6 +56,23 @@ def signing_message(contract_id: str, kind: ReportKind | str, report_hash: str) 
     """Message signe, avec separation de domaine (contrat + type de rapport + empreinte)."""
     kind_value = kind.value if isinstance(kind, ReportKind) else kind
     return SIGNING_PREFIX + contract_id.encode() + b":" + kind_value.encode() + b":" + report_hash.encode()
+
+
+def require_retention_justified(retention_cents: int, damages: Sequence[Mapping[str, Any]]) -> None:
+    """Une retenue positive exige au moins un dommage, chacun documente par au moins une photo."""
+    if retention_cents <= 0:
+        return
+    if not damages:
+        raise ValidationFailed(
+            "Une retenue exige au moins un dommage consigne dans l'etat des lieux",
+            details={"errors": [{"field": "damages", "message": "au moins un dommage requis"}]},
+        )
+    for index, damage in enumerate(damages):
+        if not damage.get("file_ids"):
+            raise ValidationFailed(
+                "Chaque dommage invoque pour une retenue doit etre photographie",
+                details={"errors": [{"field": f"damages.{index}.file_ids", "message": "photo requise"}]},
+            )
 
 
 def next_status(status: ReportStatus, action: ReportAction, *, signatures: int = 0) -> ReportStatus:

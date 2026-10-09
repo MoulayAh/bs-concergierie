@@ -429,7 +429,7 @@ def test_finalize_return_moves_contract_to_inspection_pending(
 ):
     cid = active_contract(api, keyring, owner_user, client_user)
     version = api.get(cid, owner_user).get_json()["version"]
-    draft_with_photo(api, cid, owner_user, "return", odometer_km=12_600, claimed_retention_cents=10_000)
+    draft_with_photo(api, cid, owner_user, "return", odometer_km=12_600, claimed_retention_cents=0)
 
     resp = finalize_report(api, cid, owner_user, "return")
 
@@ -910,14 +910,6 @@ def test_superseded_revision_keeps_its_photo_visible_in_history(api, owner_user,
 
 def test_supersede_without_report_is_not_found(api, owner_user, funded):
     assert_error(supersede_report(api, funded, owner_user), 404, "NOT_FOUND")
-
-
-def test_kind_return_signature_route_does_not_exist_yet(api, keyring, owner_user, client_user, provider):
-    cid = active_contract(api, keyring, owner_user, client_user)
-
-    resp = api.request("POST", f"/api/contracts/{cid}/reports/return/signatures", client_user, idem="k-ret")
-
-    assert resp.status_code in {404, 405}
 
 
 def test_register_key_helper_is_idempotent_per_user(api, keyring, owner_user):

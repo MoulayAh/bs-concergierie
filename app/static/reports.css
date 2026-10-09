@@ -10,4 +10,9 @@ button { margin: .3rem .3rem .3rem 0; padding: .4rem .8rem; cursor: pointer; }
 .badge { font-size: .8rem; background: #eee; padding: .1rem .5rem; border-radius: 1rem; }
 .damage { border: 1px dashed #aaa; padding: .4rem; margin: .4rem 0; }
 code, pre { word-break: break-all; white-space: pre-wrap; background: #f5f5f5; padding: .1rem .3rem; }
+.warn { background: #fff4e0; border: 2px solid #d80; padding: .6rem; border-radius: 4px; font-weight: 600; }
+.vbadge { display: inline-block; padding: .3rem .8rem; border-radius: 1rem; font-weight: 700; background: #eee; }
+.vbadge.good { background: #d9f2d9; color: #1a7f1a; border: 1px solid #1a7f1a; }
+.vbadge.bad { background: #fde8e8; color: #b00; border: 2px solid #b00; }
+th { text-align: left; padding-right: 1.5rem; }
 .ok { color: #1a7f1a; } .ko { color: #b00; }

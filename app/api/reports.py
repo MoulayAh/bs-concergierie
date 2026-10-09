@@ -15,6 +15,7 @@ from app.schemas.reports import CreateReportIn, KeyIn, ReportFieldsIn, Signature
 from app.security.auth import authenticate_request, current_user
 from app.security.uploads import MAX_UPLOAD_BYTES
 from app.services import keys as keys_service
+from app.services import release
 from app.services import reports as service
 from app.services.idempotency import Outcome
 
@@ -93,6 +94,7 @@ def get_history(contract_id: str, kind: str) -> tuple[Response, int]:
 def update_report(contract_id: str, kind: str) -> tuple[Response, int]:
     raw = parse_json_body(request.get_data(), request.mimetype)
     data = validate_model(ReportFieldsIn, raw)
+    release.reconcile_pending(current_user(), contract_id, kind)
     return _respond(service.update_report(current_user(), contract_id, kind, data, body=raw))
 
 
@@ -103,6 +105,7 @@ def upload_file(contract_id: str, kind: str) -> tuple[Response, int]:
         raise ValidationFailed("Exactement un fichier est attendu dans le champ multipart 'file'")
     upload = uploads[0]
     data = upload.stream.read(MAX_UPLOAD_BYTES + 1)
+    release.reconcile_pending(current_user(), contract_id, kind)
     return _respond(service.add_file(current_user(), contract_id, kind, data, upload.filename or ""))
 
 
@@ -126,6 +129,7 @@ def download_file(contract_id: str, kind: str, file_id: str) -> Response:
 
 @bp.delete(_REPORTS + "/<kind>/files/<file_id>")
 def delete_file(contract_id: str, kind: str, file_id: str) -> tuple[str, int]:
+    release.reconcile_pending(current_user(), contract_id, kind)
     service.delete_file(current_user(), contract_id, kind, file_id)
     return "", 204
 
@@ -133,12 +137,14 @@ def delete_file(contract_id: str, kind: str, file_id: str) -> tuple[str, int]:
 @bp.post(_REPORTS + "/<kind>/finalize")
 def finalize_report(contract_id: str, kind: str) -> tuple[Response, int]:
     key = _required_key()
+    release.reconcile_pending(current_user(), contract_id, kind)
     return _respond(service.finalize_report(current_user(), contract_id, kind, key=key))
 
 
 @bp.post(_REPORTS + "/<kind>/supersede")
 def supersede_report(contract_id: str, kind: str) -> tuple[Response, int]:
     key = parse_idempotency_key(request.headers.get("Idempotency-Key"), required=False)
+    release.reconcile_pending(current_user(), contract_id, kind)
     return _respond(service.supersede_report(current_user(), contract_id, kind, key=key))
 
 
@@ -148,3 +154,11 @@ def sign_checkout(contract_id: str) -> tuple[Response, int]:
     raw = parse_json_body(request.get_data(), request.mimetype)
     data = validate_model(SignatureIn, raw)
     return _respond(service.sign_checkout(current_user(), contract_id, data, key=key, body=raw))
+
+
+@bp.post(_REPORTS + "/return/signatures")
+def sign_return(contract_id: str) -> tuple[Response, int]:
+    key = _required_key()
+    raw = parse_json_body(request.get_data(), request.mimetype)
+    data = validate_model(SignatureIn, raw)
+    return _respond(release.sign_return(current_user(), contract_id, data, key=key, body=raw))

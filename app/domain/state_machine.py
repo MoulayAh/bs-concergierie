@@ -32,6 +32,7 @@ class Event(enum.StrEnum):
     START_RENTAL = "start_rental"
     SUBMIT_RETURN_REPORT = "submit_return_report"
     SIGN_REPORT = "sign_report"
+    REVISE_RETURN_REPORT = "revise_return_report"
     CONTEST = "contest"
     RESOLVE = "resolve"
 
@@ -78,6 +79,9 @@ _RULES: Final[dict[tuple[ContractStatus, Event], _Rule]] = {
     (_S.FUNDED, _E.CANCEL): _Rule(_BOTH, True, _S.REFUNDED),
     (_S.ACTIVE, _E.SUBMIT_RETURN_REPORT): _Rule(frozenset({Party.OWNER}), False, _S.INSPECTION_PENDING),
     (_S.INSPECTION_PENDING, _E.SIGN_REPORT): _Rule(_BOTH, True, _S.RELEASED),
+    (_S.INSPECTION_PENDING, _E.REVISE_RETURN_REPORT): _Rule(
+        frozenset({Party.OWNER}), False, _S.INSPECTION_PENDING
+    ),
     (_S.INSPECTION_PENDING, _E.CONTEST): _Rule(_BOTH, False, _S.DISPUTED),
     (_S.DISPUTED, _E.RESOLVE): _Rule(frozenset({Party.ADMIN}), False, _S.SETTLED),
 }

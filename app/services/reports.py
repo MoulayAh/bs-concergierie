@@ -54,7 +54,7 @@ from app.schemas.reports import (
 )
 from app.security import uploads
 from app.security.signatures import verify_signature
-from app.services import idempotency
+from app.services import idempotency, settlement_journal
 from app.services.contracts import load_for_party, parse_id, write_event
 from app.services.idempotency import Outcome, fingerprint
 
@@ -95,6 +95,11 @@ def _active_report(contract_id: uuid.UUID, kind: ReportKind, *, lock: bool) -> I
     return db.session.scalar(stmt)
 
 
+def _guard_settlement(contract_id: uuid.UUID, kind: ReportKind) -> None:
+    if kind is ReportKind.RETURN:
+        settlement_journal.forbid_if_in_progress(contract_id)
+
+
 def _require_report(contract_id: uuid.UUID, kind: ReportKind, *, lock: bool) -> InspectionReport:
     report = _active_report(contract_id, kind, lock=lock)
     if report is None:
@@ -128,9 +133,15 @@ def _view(report: InspectionReport) -> dict[str, Any]:
     return report_to_dict(report, _files(report.id), _signatures(report.id))
 
 
-def _require_contract_state(contract: Contract, kind: ReportKind) -> None:
-    expected = StoredStatus.FUNDED if kind is ReportKind.CHECKOUT else StoredStatus.ACTIVE
-    if contract.status is not expected:
+def _require_contract_state(contract: Contract, kind: ReportKind, *, revision: bool = False) -> None:
+    """Etat attendu du contrat ; une revision du retour vit en INSPECTION_PENDING (avant la 2e signature)."""
+    if kind is ReportKind.CHECKOUT:
+        allowed = {StoredStatus.FUNDED}
+    elif revision:
+        allowed = {StoredStatus.INSPECTION_PENDING}
+    else:
+        allowed = {StoredStatus.ACTIVE}
+    if contract.status not in allowed:
         raise InvalidTransition(
             f"L'etat des lieux de {'depart' if kind is ReportKind.CHECKOUT else 'retour'} "
             f"est impossible dans l'etat {contract.status.value} du contrat",
@@ -262,8 +273,9 @@ def update_report(user: User, raw_id: str, raw_kind: str, data: ReportFieldsIn, 
     ctx = _enter(user, raw_id, kind, "update_report", body, None)
     _require_owner(ctx)
     report = _require_report(ctx.contract.id, kind, lock=True)
+    _guard_settlement(ctx.contract.id, kind)
     rules.next_status(_domain_status(report), rules.ReportAction.EDIT)
-    _require_contract_state(ctx.contract, kind)
+    _require_contract_state(ctx.contract, kind, revision=report.supersedes_id is not None)
     damages = _damages_payload(data)
     _validate_values(
         ctx.contract,
@@ -312,8 +324,9 @@ def add_file(user: User, raw_id: str, raw_kind: str, data: bytes, filename: str)
     _require_report(contract_id, kind, lock=False)
     inspected = uploads.inspect_upload(data, filename)  # 413 / 415 avant toute ecriture
     report = _require_report(contract_id, kind, lock=True)  # le gel attend la fin de cet upload
+    _guard_settlement(contract_id, kind)
     rules.next_status(_domain_status(report), rules.ReportAction.ADD_FILE)
-    _require_contract_state(contract, kind)
+    _require_contract_state(contract, kind, revision=report.supersedes_id is not None)
     existing = _files(report.id)
     if len(existing) >= MAX_FILES:
         raise ValidationFailed(f"Un etat des lieux contient {MAX_FILES} fichiers au plus")
@@ -350,8 +363,9 @@ def delete_file(user: User, raw_id: str, raw_kind: str, raw_file_id: str) -> Non
     user_id = user.id
     contract, _ = load_for_party(user_id, contract_id, lock=False)
     report = _require_report(contract_id, kind, lock=True)
+    _guard_settlement(contract_id, kind)
     rules.next_status(_domain_status(report), rules.ReportAction.REMOVE_FILE)
-    _require_contract_state(contract, kind)
+    _require_contract_state(contract, kind, revision=report.supersedes_id is not None)
     item = _find_file(report.id, raw_file_id)
     if item.uploaded_by != user_id:
         raise ForbiddenActor("Vous ne pouvez supprimer que vos propres fichiers")
@@ -421,8 +435,10 @@ def finalize_report(user: User, raw_id: str, raw_kind: str, *, key: str) -> Outc
     _require_owner(ctx)
     contract = ctx.contract
     report = _require_report(contract.id, kind, lock=True)
+    _guard_settlement(contract.id, kind)
     new_status = rules.next_status(_domain_status(report), rules.ReportAction.FINALIZE)
-    _require_contract_state(contract, kind)
+    is_revision = report.supersedes_id is not None
+    _require_contract_state(contract, kind, revision=is_revision)
     files = _files(report.id)
     if not files:
         raise ValidationFailed("Au moins une photo est requise pour figer l'etat des lieux")
@@ -436,6 +452,8 @@ def finalize_report(user: User, raw_id: str, raw_kind: str, *, key: str) -> Outc
         damages=report.damages,
         file_ids={str(item.id) for item in files},
     )
+    if kind is ReportKind.RETURN:
+        rules.require_retention_justified(report.claimed_retention_cents, report.damages)
 
     frozen_at = datetime.now(UTC).replace(microsecond=0)
     content: dict[str, Any] = {
@@ -465,10 +483,9 @@ def finalize_report(user: User, raw_id: str, raw_kind: str, *, key: str) -> Outc
     canonical = rules.canonical_bytes(content)
 
     if kind is ReportKind.RETURN:
-        result = transition(
-            ContractStatus(contract.status.value), Event.SUBMIT_RETURN_REPORT, actor=ctx.party
-        )
         previous = contract.status
+        return_event = Event.REVISE_RETURN_REPORT if is_revision else Event.SUBMIT_RETURN_REPORT
+        result = transition(ContractStatus(contract.status.value), return_event, actor=ctx.party)
         contract.status = StoredStatus(result.status.value)
         contract.version += 1
 
@@ -483,17 +500,10 @@ def finalize_report(user: User, raw_id: str, raw_kind: str, *, key: str) -> Outc
     if kind is ReportKind.RETURN:
         write_event(
             contract.id,
-            Event.SUBMIT_RETURN_REPORT.value,
+            return_event.value,
             ctx.user_id,
             previous,
             contract.status,
-            {
-                "op": Event.SUBMIT_RETURN_REPORT.value,
-                "actor": str(ctx.user_id),
-                "report_id": str(report.id),
-                "report_hash": report.report_hash,
-                "version": contract.version,
-            },
             {"report_id": str(report.id), "report_hash": report.report_hash},
         )
     return _finish(ctx, 200, _view(report))
@@ -565,9 +575,10 @@ def supersede_report(user: User, raw_id: str, raw_kind: str, *, key: str | None)
     _require_owner(ctx)
     contract = ctx.contract
     old = _require_report(contract.id, kind, lock=True)
+    _guard_settlement(contract.id, kind)
     signed = len(_signatures(old.id))
     new_status = rules.next_status(_domain_status(old), rules.ReportAction.SUPERSEDE, signatures=signed)
-    _require_contract_state(contract, kind)
+    _require_contract_state(contract, kind, revision=True)
     old_files = _files(old.id)
     file_map = {str(item.id): uuid.uuid4() for item in old_files}
 

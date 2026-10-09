@@ -36,6 +36,15 @@ class Deposit(Base):
             "held_cents + refunded_cents + released_cents + retained_cents = amount_cents",
             name="ledger_balanced",
         ),
+        CheckConstraint(
+            "status <> 'HELD' OR (released_cents = 0 AND retained_cents = 0)",
+            name="held_has_no_settlement",
+        ),
+        CheckConstraint(
+            "status NOT IN ('RELEASED','SETTLED') OR held_cents = 0", name="final_has_nothing_held"
+        ),
+        CheckConstraint("status <> 'RELEASED' OR retained_cents = 0", name="released_has_no_retention"),
+        CheckConstraint("status <> 'SETTLED' OR retained_cents > 0", name="settled_has_retention"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -61,6 +70,8 @@ class Deposit(Base):
     )
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     provider_ref: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    settlement_ref: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

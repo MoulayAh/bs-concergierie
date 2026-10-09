@@ -5,6 +5,7 @@ entre le schema migre et les modeles SQLAlchemy.
 """
 
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from flask_migrate import downgrade, upgrade
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
+from app.domain.event_chain import GENESIS, compute_event_hash, format_timestamp
 from app.extensions import db
 
 MIGRATIONS_DIR = str(Path(__file__).resolve().parents[2] / "migrations")
@@ -49,13 +51,35 @@ def _seed_event(app: Flask) -> str:
             ),
             {"id": contract, "o": owner, "c": client},
         )
+        created_at = datetime(2026, 10, 9, 12, 0, 0, 123456, tzinfo=UTC)
+        event_hash = compute_event_hash(
+            GENESIS,
+            {
+                "contract_id": contract,
+                "seq": 1,
+                "event": "create",
+                "actor_id": owner,
+                "from_status": None,
+                "to_status": "DRAFT",
+                "payload_hash": None,
+                "created_at": format_timestamp(created_at),
+            },
+        )
         conn.execute(
             text(
-                "INSERT INTO escrow_events (id, contract_id, event, actor_id, from_status, to_status) "
+                "INSERT INTO escrow_events (id, contract_id, event, actor_id, from_status, to_status, "
+                "seq, prev_hash, event_hash, created_at) "
                 "VALUES (CAST(:id AS uuid), CAST(:cid AS uuid), 'create', CAST(:a AS uuid), NULL, "
-                "CAST('DRAFT' AS contract_status))"
+                "CAST('DRAFT' AS contract_status), 1, :prev, :hash, :at)"
             ),
-            {"id": event, "cid": contract, "a": owner},
+            {
+                "id": event,
+                "cid": contract,
+                "a": owner,
+                "prev": GENESIS,
+                "hash": event_hash,
+                "at": created_at,
+            },
         )
     return event
 
