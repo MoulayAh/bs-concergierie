@@ -75,3 +75,13 @@ class PaymentUnavailable(DomainError):
 class SignatureInvalid(DomainError):
     code = "SIGNATURE_INVALID"
     http_status = 422
+
+
+class KeyNotRegistered(DomainError):
+    code = "KEY_NOT_REGISTERED"
+    http_status = 422
+
+
+class KeyAlreadyActive(DomainError):
+    code = "KEY_ALREADY_ACTIVE"
+    http_status = 409

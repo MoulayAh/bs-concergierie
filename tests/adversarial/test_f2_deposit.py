@@ -22,6 +22,7 @@ from tests.fixtures.deposits import (
     run_concurrently,
 )
 from tests.fixtures.helpers import DEPOSIT_BODY, VALID_BODY, Api, TestUser, assert_error, new_key
+from tests.fixtures.reports import KeyRing, signed_checkout, start_signed
 
 pytestmark = pytest.mark.adversarial
 
@@ -468,7 +469,7 @@ def test_refund_provider_down_leaves_state_consistent(app, api, owner_user, clie
 
 def test_cancel_after_start_rejected(app, api, owner_user, client_user, provider):
     cid = funded_contract(api, owner_user, client_user)
-    assert api.start(cid, owner_user).status_code == 200
+    assert start_signed(api, KeyRing(api), cid, owner_user, client_user).status_code == 200
     before = full_state(app, api, cid, client_user)
     for who in (client_user, owner_user):
         assert_error(api.cancel(cid, who), 409, "INVALID_TRANSITION")
@@ -510,6 +511,7 @@ def _final_consistency(app: Flask, api: Api, cid: str, client: TestUser, provide
 @pytest.mark.parametrize("round_", range(3))
 def test_race_cancel_vs_start(app, api, owner_user, client_user, provider, round_):
     cid = funded_contract(api, owner_user, client_user)
+    signed_checkout(api, KeyRing(api), cid, owner_user, client_user)  # F3 : start exige un checkout signe x2
     results = run_concurrently(
         app, [lambda a: a.cancel(cid, client_user), lambda a: a.start(cid, owner_user)]
     )
@@ -543,6 +545,7 @@ def test_race_cancel_vs_cancel_refunds_once(app, api, owner_user, client_user, p
 @pytest.mark.parametrize("round_", range(3))
 def test_race_cancel_cancel_start(app, api, owner_user, client_user, provider, round_):
     cid = funded_contract(api, owner_user, client_user)
+    signed_checkout(api, KeyRing(api), cid, owner_user, client_user)  # F3 : start exige un checkout signe x2
     results = run_concurrently(
         app,
         [

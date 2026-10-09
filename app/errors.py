@@ -3,14 +3,16 @@
 import logging
 from typing import Any
 
-from flask import Flask, Response, jsonify
-from sqlalchemy.exc import OperationalError
+from flask import Flask, Response, jsonify, request
+from sqlalchemy.exc import DBAPIError, OperationalError
 from werkzeug.exceptions import HTTPException, MethodNotAllowed
 
 from app.domain.errors import DomainError
 from app.extensions import db
 
 logger = logging.getLogger(__name__)
+
+_RESTRICT_VIOLATION = "23001"  # SQLSTATE leve par le trigger de gel des rapports
 
 _HTTP_CODES: dict[int, str] = {
     400: "BAD_REQUEST",
@@ -19,7 +21,7 @@ _HTTP_CODES: dict[int, str] = {
     404: "NOT_FOUND",
     405: "METHOD_NOT_ALLOWED",
     408: "REQUEST_TIMEOUT",
-    413: "PAYLOAD_TOO_LARGE",
+    413: "FILE_TOO_LARGE",
     415: "UNSUPPORTED_MEDIA_TYPE",
     422: "VALIDATION_ERROR",
 }
@@ -44,6 +46,14 @@ def _rollback() -> None:
     db.session.rollback()
 
 
+def _discard_request_body() -> None:
+    """Refus 413 : le corps (jamais lu en entier) est ferme pour ne laisser aucun descripteur ouvert."""
+    stream = request.environ.get("wsgi.input")
+    close = getattr(stream, "close", None)
+    if callable(close):
+        close()
+
+
 def register_error_handlers(app: Flask) -> None:
     @app.errorhandler(DomainError)
     def _domain_error(exc: DomainError) -> tuple[Response, int]:
@@ -54,6 +64,8 @@ def register_error_handlers(app: Flask) -> None:
     def _http_error(exc: HTTPException) -> tuple[Response, int]:
         _rollback()
         status = exc.code or 500
+        if status == 413:
+            _discard_request_body()
         code = _HTTP_CODES.get(status, "HTTP_ERROR")
         message = _HTTP_MESSAGES.get(status, "Requete invalide")
         body, _ = error_response(status, code, message)
@@ -66,6 +78,20 @@ def register_error_handlers(app: Flask) -> None:
         logger.error("Base de donnees indisponible", exc_info=exc)
         _rollback()
         return error_response(503, "SERVICE_UNAVAILABLE", "Service temporairement indisponible")
+
+    @app.errorhandler(DBAPIError)
+    def _database_error(exc: DBAPIError) -> tuple[Response, int]:
+        _rollback()
+        if getattr(exc.orig, "sqlstate", None) == _RESTRICT_VIOLATION:
+            # Trigger de gel d'un rapport : la base refuse, l'API repond 409 comme la couche metier.
+            return error_response(
+                409,
+                "INVALID_TRANSITION",
+                "Le rapport est fige et ne peut plus etre modifie",
+                {"reason": "REPORT_FROZEN"},
+            )
+        logger.error("Erreur base de donnees non geree", exc_info=exc)
+        return error_response(500, "INTERNAL_ERROR", "Erreur interne du serveur")
 
     @app.errorhandler(Exception)
     def _unexpected_error(exc: Exception) -> tuple[Response, int]:

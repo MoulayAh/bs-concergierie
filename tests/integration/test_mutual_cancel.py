@@ -14,6 +14,7 @@ from tests.fixtures.deposits import (
     run_concurrently,
 )
 from tests.fixtures.helpers import assert_error
+from tests.fixtures.reports import signed_checkout, start_signed
 
 pytestmark = pytest.mark.integration
 
@@ -158,7 +159,10 @@ def test_cancel_in_awaiting_deposit_has_no_fund(app, api, owner_user, client_use
 # ---------------------------------------------------------------- remise du vehicule
 
 
-def test_start_rental_by_owner_moves_to_active_and_keeps_funds(app, api, owner_user, client_user, funded):
+def test_start_rental_by_owner_moves_to_active_and_keeps_funds(
+    app, api, keyring, owner_user, client_user, funded
+):
+    signed_checkout(api, keyring, funded, owner_user, client_user)  # F3 : depart double-signe requis
     version = api.get(funded, owner_user).get_json()["version"]
 
     resp = api.start(funded, owner_user)
@@ -216,8 +220,8 @@ def test_start_rental_in_draft_is_invalid_transition(app, api, owner_user, clien
     _assert_unchanged(app, api, cid, owner_user, before)
 
 
-def test_start_rental_twice_is_invalid_transition(app, api, owner_user, funded):
-    assert api.start(funded, owner_user).status_code == 200
+def test_start_rental_twice_is_invalid_transition(app, api, keyring, owner_user, client_user, funded):
+    assert start_signed(api, keyring, funded, owner_user, client_user).status_code == 200
     before = full_state(app, api, funded, owner_user)
 
     assert_error(api.start(funded, owner_user), 409, "INVALID_TRANSITION")
@@ -236,7 +240,10 @@ def test_start_rental_after_refund_is_invalid_transition(app, api, owner_user, c
 
 
 @pytest.mark.parametrize("requester", ["client", "owner"])
-def test_start_rental_blocked_by_pending_cancellation(app, api, owner_user, client_user, funded, requester):
+def test_start_rental_blocked_by_pending_cancellation(
+    app, api, keyring, owner_user, client_user, funded, requester
+):
+    signed_checkout(api, keyring, funded, owner_user, client_user)  # seule l'annulation bloque
     user = client_user if requester == "client" else owner_user
     assert api.cancel(funded, user).status_code == 200
     before = full_state(app, api, funded, owner_user)
@@ -248,7 +255,10 @@ def test_start_rental_blocked_by_pending_cancellation(app, api, owner_user, clie
     assert deposit_rows(app, funded)[0]["held_cents"] == AMOUNT
 
 
-def test_pending_cancellation_cannot_be_withdrawn_by_a_body_flag(app, api, owner_user, client_user, funded):
+def test_pending_cancellation_cannot_be_withdrawn_by_a_body_flag(
+    app, api, keyring, owner_user, client_user, funded
+):
+    signed_checkout(api, keyring, funded, owner_user, client_user)
     api.cancel(funded, client_user)
 
     resp = api.cancel(funded, client_user, {"withdraw": True})
@@ -262,8 +272,10 @@ def test_pending_cancellation_cannot_be_withdrawn_by_a_body_flag(app, api, owner
 
 
 @pytest.mark.parametrize("who", ["owner", "client"])
-def test_cancel_after_start_is_invalid_transition(app, api, owner_user, client_user, funded, provider, who):
-    assert api.start(funded, owner_user).status_code == 200
+def test_cancel_after_start_is_invalid_transition(
+    app, api, keyring, owner_user, client_user, funded, provider, who
+):
+    assert start_signed(api, keyring, funded, owner_user, client_user).status_code == 200
     before = full_state(app, api, funded, owner_user)
     user = owner_user if who == "owner" else client_user
 
@@ -293,7 +305,11 @@ def test_simultaneous_cancel_by_both_parties_refunds_exactly_once(
     assert len(provider.refund_calls) == 1
 
 
-def test_simultaneous_cancel_and_start_stay_coherent(app, api, owner_user, client_user, funded, provider):
+def test_simultaneous_cancel_and_start_stay_coherent(
+    app, api, keyring, owner_user, client_user, funded, provider
+):
+    signed_checkout(api, keyring, funded, owner_user, client_user)
+    base_version = api.get(funded, owner_user).get_json()["version"]
     jobs = [lambda a: a.cancel(funded, client_user), lambda a: a.start(funded, owner_user)]
 
     cancel_resp, start_resp = run_concurrently(app, jobs)
@@ -314,4 +330,4 @@ def test_simultaneous_cancel_and_start_stay_coherent(app, api, owner_user, clien
         assert data["cancellation"]["client_approved"] is True
     events = api.events(funded, owner_user).get_json()["events"]
     assert len([e for e in events if e["event"] in {"cancel", "start_rental"}]) == 1
-    assert data["version"] == 5
+    assert data["version"] == base_version + 1

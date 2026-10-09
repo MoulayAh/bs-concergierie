@@ -25,6 +25,7 @@ from tests.fixtures.deposits import (
     transition_events,
 )
 from tests.fixtures.helpers import DEPOSIT_BODY, VALID_BODY, assert_error, new_key
+from tests.fixtures.reports import start_signed
 
 pytestmark = pytest.mark.integration
 
@@ -364,9 +365,9 @@ def test_second_deposit_with_other_key_on_funded_contract_is_invalid_transition(
     assert len(provider.hold_calls) == 1
 
 
-def test_deposit_on_active_contract_is_invalid_transition(app, api, owner_user, client_user):
+def test_deposit_on_active_contract_is_invalid_transition(app, api, keyring, owner_user, client_user):
     cid = funded_contract(api, owner_user, client_user)
-    assert api.start(cid, owner_user).status_code == 200
+    assert start_signed(api, keyring, cid, owner_user, client_user).status_code == 200
     before = full_state(app, api, cid, owner_user)
 
     assert_error(api.deposit(cid, client_user), 409, "INVALID_TRANSITION")

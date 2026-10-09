@@ -1,0 +1,13 @@
+body { font-family: system-ui, sans-serif; max-width: 52rem; margin: 1rem auto; padding: 0 1rem; color: #222; }
+section { border: 1px solid #ccc; border-radius: 6px; padding: .5rem 1rem; margin: 1rem 0; }
+label { display: block; margin: .4rem 0; }
+input, select, textarea { display: block; width: 100%; box-sizing: border-box; padding: .3rem; }
+input[type=file] { width: auto; display: inline-block; }
+button { margin: .3rem .3rem .3rem 0; padding: .4rem .8rem; cursor: pointer; }
+.row { display: flex; flex-wrap: wrap; }
+.error { background: #fde8e8; border: 1px solid #c33; padding: .6rem; border-radius: 4px; }
+.info { background: #e8f5e9; border: 1px solid #3a3; padding: .6rem; border-radius: 4px; }
+.badge { font-size: .8rem; background: #eee; padding: .1rem .5rem; border-radius: 1rem; }
+.damage { border: 1px dashed #aaa; padding: .4rem; margin: .4rem 0; }
+code, pre { word-break: break-all; white-space: pre-wrap; background: #f5f5f5; padding: .1rem .3rem; }
+.ok { color: #1a7f1a; } .ko { color: #b00; }

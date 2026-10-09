@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Luxe Escrow - Etat des lieux</title>
+<link rel="stylesheet" href="/static/reports.css">
+</head>
+<body>
+<h1>Etat des lieux numerique</h1>
+<div id="error" class="error" role="alert" hidden></div>
+<div id="info" class="info" role="status" hidden></div>
+<div id="nocrypto" class="error" hidden></div>
+
+<section>
+  <h2>1. Session</h2>
+  <label>Jeton Bearer <input id="token" type="password" autocomplete="off"></label>
+  <label>Id du contrat <input id="contract" type="text" autocomplete="off"></label>
+  <label>Type
+    <select id="kind"><option value="checkout">checkout (depart)</option><option value="return">return (retour)</option></select>
+  </label>
+  <button id="load" type="button">Charger</button>
+</section>
+
+<section>
+  <h2>2. Rapport <span id="status" class="badge"></span></h2>
+  <form id="form">
+    <label>Kilometrage <input id="odometer" type="number" min="0" max="2000000" step="1" required></label>
+    <label>Carburant (huitiemes, 0-8) <input id="fuel" type="number" min="0" max="8" step="1" required></label>
+    <label>Retenue demandee (EUR) <input id="retention" type="text" inputmode="decimal" value="0"></label>
+    <label>Notes <textarea id="notes" maxlength="2000"></textarea></label>
+    <h3>Dommages</h3>
+    <div id="damages"></div>
+    <button id="add-damage" type="button">Ajouter un dommage</button>
+    <div class="row">
+      <button id="create" type="button">Creer le rapport</button>
+      <button id="save" type="submit">Enregistrer</button>
+      <button id="finalize" type="button">Figer (finalize)</button>
+      <button id="supersede" type="button">Remplacer (supersede)</button>
+    </div>
+  </form>
+</section>
+
+<section>
+  <h2>3. Fichiers</h2>
+  <p>JPEG, PNG ou PDF, 10 Mo maximum, 20 fichiers par rapport.</p>
+  <input id="file" type="file" accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf">
+  <button id="upload" type="button">Envoyer</button>
+  <ul id="files"></ul>
+</section>
+
+<section>
+  <h2>4. Empreinte</h2>
+  <p>report_hash serveur : <code id="hash-server">-</code></p>
+  <p>Recalcul local (SHA-256) : <code id="hash-local">-</code> <strong id="hash-match"></strong></p>
+  <pre id="canonical"></pre>
+</section>
+
+<section>
+  <h2>5. Cle et signature</h2>
+  <p>Cle locale : <span id="localkey">-</span></p>
+  <div class="row">
+    <button id="genkey" type="button">Generer et enregistrer ma cle</button>
+    <button id="listkeys" type="button">Mes cles serveur</button>
+    <button id="sign" type="button">Signer l'empreinte</button>
+  </div>
+  <ul id="keys"></ul>
+  <p>Signatures : <span id="sigs">-</span></p>
+</section>
+
+<section>
+  <h2>6. Historique des revisions</h2>
+  <ul id="history"></ul>
+</section>
+
+<script src="/static/reports.js"></script>
+</body>
+</html>

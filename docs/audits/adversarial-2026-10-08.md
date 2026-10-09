@@ -195,3 +195,53 @@ Tests : `tests/adversarial/test_f2_deposit.py` — **1 failed, 89 passed**.
 Observation (pas de test rouge) : apres un refund prestataire reussi, un echec du `commit` laisserait
 le contrat FUNDED/HELD alors que l'argent est rendu ; le reessai rappelle `refund` (idempotent par
 contrat d'interface). A couvrir par une reconciliation / outbox en F3.
+
+---
+
+# F3 — etats des lieux (boucle 1, 2026-10-09)
+
+Tests : `tests/adversarial/test_f3_reports.py` — **3 failed, 98 passed** (F3-ADV-2 rouge au 1er passage,
+verte au second : le regex `_PDF_FORBIDDEN` de `uploads.py` refuse desormais `/ObjStm`, correctif fait en
+parallele).
+
+### F3-ADV-1 — cle publique d'ordre faible : signature universelle acceptee (Haute)
+
+- **Attaque** : le client enregistre `public_key = base64(01 00..00)` (point neutre), puis signe le
+  checkout avec `R = 01 00..00, S = 0` (64 octets fixes). Tests : `test_weak_public_key_refused`,
+  `test_universal_signature_never_accepted`.
+- **Resultat** : FAILLE. Cle acceptee (201), signature acceptee (200). Cette signature verifie pour
+  TOUT message : elle ne lie ni le contrat ni l'empreinte. La non-repudiation, raison d'etre du tiers de
+  confiance, disparait (le signataire peut nier, la preuve ne vaut rien).
+- **Correctif** : dans `decode_public_key`, refuser les 8 encodages de points d'ordre faible (liste
+  connue, ex. libsodium `has_small_order`) et les encodages non canoniques ; en defense, refuser aussi
+  un `R` d'ordre faible dans `verify_signature` (ou verifier via libsodium/PyNaCl, qui le fait).
+
+### F3-ADV-2 — PDF : JavaScript cache dans un flux d'objets compresse (Moyenne)
+
+- **Attaque** : PDF 1.5 dont le catalogue (`/OpenAction`) et l'action `/S /JavaScript` sont dans un
+  `/ObjStm /FlateDecode`. Test : `test_trapped_file_refused_without_side_effect[pdf_objstm_javascript]`.
+- **Resultat** : FAILLE au 1er passage (201) ; CORRIGEE depuis (`/ObjStm` refuse). Reste a surveiller :
+  un `/JavaScript` dans un flux de contenu compresse ordinaire n'est toujours pas decompresse avant la
+  recherche.
+- **Correctif** : refuser tout PDF contenant `/ObjStm` ou `/XRef` stream et tout flux filtre hors
+  liste blanche, ou decompresser (borne) chaque flux avant la recherche ; plus sur : ne pas accepter le
+  PDF (photos seules) ou le re-rasteriser.
+
+### F3-ADV-3 — polyglotte PDF/ZIP stocke tel quel (Basse)
+
+- **Attaque** : archive ZIP inseree avant `xref` d'un PDF sain (`zipfile.is_zipfile` vrai). Test :
+  `[pdf_zip_polyglot]`. **Resultat** : FAILLE, 201, octets stockes et servis intacts (impact limite par
+  `attachment` + `nosniff`). **Correctif** : refuser les signatures `PK\x03\x04` / `PK\x05\x06` dans
+  un PDF, ou lier l'acceptation des PDF au correctif F3-ADV-2 (re-rendu).
+
+### Attaques F3 repoussees (OK)
+
+| Zone | Attaques | Resultat |
+|------|----------|----------|
+| Fichiers | exe/zip/svg en .jpg/.png, GIF, HEIC, vide, 1 octet, JPEG tronque, PNG<->JPEG<->PDF par extension, `.jpg.exe`, sans extension, PDF /JavaScript /JS /OpenAction /Launch /EmbeddedFile /AA, `/Java#53cript`, chiffre, 25 pages, bombe PNG 20000x20000, 8001 px, 10 Mo+1 et 50 Mo, multipart vide/2 fichiers/mauvais champ/JSON | OK : 415/413/422, etat + disque inchanges |
+| Contenu | EXIF, tEXt HTML, polyglotte JPEG/ZIP, Content-Type menteur | OK : re-encodes, type reel retenu |
+| Noms | `../../etc/passwd.jpg`, `..\..\`, absolu, 10 000 car., RTLO, injection Content-Disposition, octet nul | OK : UUID dans UPLOAD_DIR, rien hors dossier |
+| Signatures | cle de l'autre partie, empreinte client, autre contrat, domaine `return`, revision supersedee, cle revoquee, double (sequentielle et concurrente), DRAFT, base64 malforme x13, bit inverse | OK : 422/409, etat inchange |
+| Acteurs | client create/update/finalize/supersede (403), loueur supprime photo client (403), tiers / IDOR (404 identiques), sans jeton (401) | OK |
+| Metier | retenue != 0 au depart, retenue > caution, kilometrage qui recule, start sans signature client, rapport SIGNED intouchable | OK |
+| Courses | upload x4 vs gel, 2e signature vs supersede, remplacement apres signature client | OK : empreinte = fichiers, aucun orphelin, jamais SIGNED remplace, historique conserve |

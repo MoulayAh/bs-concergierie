@@ -29,6 +29,29 @@ class DepositStatus(enum.StrEnum):
     SETTLED = "SETTLED"
 
 
+class ReportKind(enum.StrEnum):
+    """Type d'etat des lieux (ENUM PostgreSQL `report_kind`)."""
+
+    CHECKOUT = "checkout"
+    RETURN = "return"
+
+
+class ReportStatus(enum.StrEnum):
+    """Cycle de vie d'un rapport (ENUM PostgreSQL `report_status`)."""
+
+    DRAFT = "DRAFT"
+    FROZEN = "FROZEN"
+    SIGNED = "SIGNED"
+    SUPERSEDED = "SUPERSEDED"
+
+
+class ReportParty(enum.StrEnum):
+    """Partie signataire (ENUM PostgreSQL `report_party`)."""
+
+    OWNER = "owner"
+    CLIENT = "client"
+
+
 class UserRole(enum.StrEnum):
     CLIENT = "client"
     OWNER = "owner"

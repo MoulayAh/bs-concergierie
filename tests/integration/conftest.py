@@ -1,9 +1,14 @@
-"""Fixtures F2 : prestataire de paiement injectable (voir tests/fixtures/deposits.py pour l'interface)."""
+"""Fixtures F2 : prestataire de paiement injectable (voir tests/fixtures/deposits.py pour l'interface).
+
+Fixtures F3 : ``keyring`` (cles Ed25519 de test par utilisateur, voir tests/fixtures/reports.py).
+"""
 
 import pytest
 from flask import Flask
 
 from tests.fixtures.deposits import RecordingProvider
+from tests.fixtures.helpers import Api
+from tests.fixtures.reports import KeyRing
 
 
 @pytest.fixture
@@ -20,3 +25,8 @@ def flaky_provider(app: Flask) -> RecordingProvider:
     recording = RecordingProvider(fail_next_holds=1)
     app.extensions["payment_provider"] = recording
     return recording
+
+
+@pytest.fixture
+def keyring(api: Api) -> KeyRing:
+    return KeyRing(api)

@@ -24,7 +24,17 @@ from app.domain.errors import (
 from app.domain.money import validate_deposit_cents
 from app.domain.state_machine import ContractStatus, Event, Party, transition
 from app.extensions import db
-from app.models import Contract, Deposit, DepositStatus, EscrowEvent, User, UserRole
+from app.models import (
+    Contract,
+    Deposit,
+    DepositStatus,
+    EscrowEvent,
+    InspectionReport,
+    ReportKind,
+    ReportStatus,
+    User,
+    UserRole,
+)
 from app.models import ContractStatus as StoredStatus
 from app.schemas.contracts import CreateContractIn, DepositIn, contract_to_dict, funds_to_dict
 from app.services import idempotency
@@ -40,7 +50,7 @@ def require_owner(user: User) -> None:
         raise ForbiddenActor("Seul un loueur peut creer un contrat")
 
 
-def _parse_id(raw_id: str) -> uuid.UUID:
+def parse_id(raw_id: str) -> uuid.UUID:
     try:
         return uuid.UUID(raw_id)
     except ValueError as exc:
@@ -55,7 +65,7 @@ def _party_of(contract: Contract, user_id: uuid.UUID) -> Party | None:
     return None
 
 
-def _load_for_party(user_id: uuid.UUID, contract_id: uuid.UUID, *, lock: bool) -> tuple[Contract, Party]:
+def load_for_party(user_id: uuid.UUID, contract_id: uuid.UUID, *, lock: bool) -> tuple[Contract, Party]:
     """Charge le contrat (verrou de ligne optionnel). Inexistant ou tiers => meme 404 (pas d'IDOR)."""
     stmt = select(Contract).where(Contract.id == contract_id).execution_options(populate_existing=True)
     if lock:
@@ -67,7 +77,7 @@ def _load_for_party(user_id: uuid.UUID, contract_id: uuid.UUID, *, lock: bool) -
     return contract, party
 
 
-def _write_event(
+def write_event(
     contract_id: uuid.UUID,
     event: str,
     actor_id: uuid.UUID,
@@ -122,7 +132,7 @@ def create_contract(
     )
     db.session.add(contract)
     db.session.flush()
-    _write_event(
+    write_event(
         contract.id,
         "create",
         owner_id,
@@ -152,12 +162,12 @@ def _apply_event(
     body: object,
     idempotency_key: str | None,
 ) -> Outcome:
-    contract_id = _parse_id(raw_id)
+    contract_id = parse_id(raw_id)
     user_id = user.id
     request_hash = fingerprint({"op": event.value, "contract": str(contract_id), "body": body})
     if idempotency_key is not None:
         idempotency.lock_key(idempotency_key, user_id)
-    contract, party = _load_for_party(user_id, contract_id, lock=True)
+    contract, party = load_for_party(user_id, contract_id, lock=True)
     if idempotency_key is not None:
         replay = idempotency.find_replay(idempotency_key, user_id, request_hash)
         if replay is not None:
@@ -172,6 +182,8 @@ def _apply_event(
             "Une demande d'annulation est en attente : le vehicule ne peut pas etre remis",
             details={"reason": "CANCELLATION_PENDING"},
         )
+    if event is Event.START_RENTAL:
+        _require_signed_checkout(contract_id)
 
     previous = contract.status
     now = datetime.now(UTC)
@@ -188,7 +200,7 @@ def _apply_event(
     contract.version += 1
     db.session.flush()
 
-    _write_event(
+    write_event(
         contract_id,
         event.value,
         user_id,
@@ -202,6 +214,22 @@ def _apply_event(
         idempotency.record(idempotency_key, user_id, request_hash, outcome)
     db.session.commit()
     return outcome
+
+
+def _require_signed_checkout(contract_id: uuid.UUID) -> None:
+    """La remise du vehicule exige un etat des lieux de depart actif signe par les deux parties."""
+    status = db.session.scalar(
+        select(InspectionReport.status).where(
+            InspectionReport.contract_id == contract_id,
+            InspectionReport.kind == ReportKind.CHECKOUT,
+            InspectionReport.status != ReportStatus.SUPERSEDED,
+        )
+    )
+    if status is not ReportStatus.SIGNED:
+        raise InvalidTransition(
+            "L'etat des lieux de depart doit etre signe par les deux parties avant la remise du vehicule",
+            details={"reason": "CHECKOUT_REPORT_NOT_SIGNED"},
+        )
 
 
 def _approvals(contract: Contract, event: Event) -> frozenset[Party]:
@@ -248,11 +276,11 @@ def _refund(deposit: Deposit | None) -> None:
 
 
 def deposit_funds(user: User, raw_id: str, data: DepositIn, *, idempotency_key: str, body: object) -> Outcome:
-    contract_id = _parse_id(raw_id)
+    contract_id = parse_id(raw_id)
     user_id = user.id
     request_hash = fingerprint({"op": Event.DEPOSIT.value, "contract": str(contract_id), "body": body})
     idempotency.lock_key(idempotency_key, user_id)
-    contract, party = _load_for_party(user_id, contract_id, lock=True)
+    contract, party = load_for_party(user_id, contract_id, lock=True)
     replay = idempotency.find_replay(idempotency_key, user_id, request_hash)
     if replay is not None:
         return replay
@@ -272,7 +300,7 @@ def deposit_funds(user: User, raw_id: str, data: DepositIn, *, idempotency_key: 
     except (PaymentDeclined, PaymentUnavailable) as exc:
         db.session.rollback()  # libere le verrou ; le journal est ecrit dans une transaction separee
         try:
-            _write_event(
+            write_event(
                 contract_id,
                 "deposit_failed",
                 user_id,
@@ -301,7 +329,7 @@ def deposit_funds(user: User, raw_id: str, data: DepositIn, *, idempotency_key: 
         contract.status = StoredStatus(result.status.value)
         contract.version += 1
         db.session.flush()
-        _write_event(
+        write_event(
             contract_id,
             Event.DEPOSIT.value,
             user_id,
@@ -326,7 +354,7 @@ def deposit_funds(user: User, raw_id: str, data: DepositIn, *, idempotency_key: 
 
 
 def get_deposit(user: User, raw_id: str) -> dict[str, Any]:
-    contract, _ = _load_for_party(user.id, _parse_id(raw_id), lock=False)
+    contract, _ = load_for_party(user.id, parse_id(raw_id), lock=False)
     deposit = _read_deposit(contract.id)
     if deposit is None:
         raise ResourceNotFound("Aucun depot pour ce contrat")
@@ -352,12 +380,12 @@ def cancel_contract(user: User, raw_id: str, *, body: object, idempotency_key: s
 
 
 def get_contract(user: User, raw_id: str) -> dict[str, Any]:
-    contract, _ = _load_for_party(user.id, _parse_id(raw_id), lock=False)
+    contract, _ = load_for_party(user.id, parse_id(raw_id), lock=False)
     return contract_to_dict(contract, _read_deposit(contract.id))
 
 
 def list_events(user: User, raw_id: str) -> list[dict[str, Any]]:
-    contract, _ = _load_for_party(user.id, _parse_id(raw_id), lock=False)
+    contract, _ = load_for_party(user.id, parse_id(raw_id), lock=False)
     rows = db.session.scalars(
         select(EscrowEvent)
         .where(EscrowEvent.contract_id == contract.id)

@@ -3,14 +3,16 @@
 import os
 from typing import Any
 
-from flask import Flask
+from flask import Flask, Response
 from sqlalchemy.pool import NullPool
 
 from app.api.contracts import bp as contracts_bp
+from app.api.reports import bp as reports_bp
 from app.cli import register_cli
 from app.domain.money import MAX_DEPOSIT_CENTS
 from app.errors import register_error_handlers
 from app.extensions import db, migrate
+from app.http import MemoryUploadRequest
 from app.services.payments import SimulatedProvider
 
 DEFAULT_MAX_CONTENT_LENGTH = 10 * 1024 * 1024
@@ -19,6 +21,7 @@ _DEV_DATABASE_URL = "postgresql+psycopg://escrow:escrow_dev@localhost:5432/escro
 
 def create_app(config: dict[str, Any] | None = None) -> Flask:
     app = Flask(__name__)
+    app.request_class = MemoryUploadRequest
     app.config.from_mapping(
         SECRET_KEY=os.environ.get("SECRET_KEY"),
         DATABASE_URL=os.environ.get("DATABASE_URL", _DEV_DATABASE_URL),
@@ -45,5 +48,12 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
     app.extensions["payment_provider"] = SimulatedProvider()
     register_error_handlers(app)
     app.register_blueprint(contracts_bp)
+    app.register_blueprint(reports_bp)
+
+    @app.get("/reports")
+    def reports_page() -> Response:
+        """Ecran de demo des etats des lieux (page statique ; les appels API portent le jeton Bearer)."""
+        return app.send_static_file("reports.html")
+
     register_cli(app)
     return app
